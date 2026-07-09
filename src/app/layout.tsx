@@ -1,0 +1,53 @@
+import type { Metadata } from "next";
+import { Geist, Geist_Mono } from "next/font/google";
+import "./globals.css";
+import { LocaleInitializer } from "@frontend/components/locale-initializer";
+
+const geistSans = Geist({
+  variable: "--font-geist-sans",
+  subsets: ["latin"],
+});
+
+const geistMono = Geist_Mono({
+  variable: "--font-geist-mono",
+  subsets: ["latin"],
+});
+
+export const metadata: Metadata = {
+  // 标题/描述中英双语，中文在前：国内为主、兼顾海外搜索收录
+  title: "ClipForge — AI 短视频带货创作工具 | AI Short Video Creator",
+  description:
+    "一句话主题或一张商品图，一键产出抖音 / 快手 / 小红书 / TikTok 竖屏带货短视频：AI 写脚本、自动配画面、免费配音、烧字幕。Turn one sentence or a product photo into a vertical short video — AI script, free stock footage, voiceover & subtitles in one click.",
+  keywords: [
+    "AI 短视频",
+    "带货短视频",
+    "AI 视频生成",
+    "抖音",
+    "快手",
+    "小红书",
+    "TikTok",
+    "text to video",
+    "faceless video",
+    "AI video generator",
+  ],
+};
+
+export default function RootLayout({
+  children,
+}: Readonly<{
+  children: React.ReactNode;
+}>) {
+  // 全站默认暗色创作台主题：在 <html> 上固定 dark class
+  return (
+    <html
+      lang="zh-CN"
+      className={`dark ${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      suppressHydrationWarning
+    >
+      <body className="min-h-full flex flex-col bg-background text-foreground" suppressHydrationWarning>
+        <LocaleInitializer />
+        {children}
+      </body>
+    </html>
+  );
+}

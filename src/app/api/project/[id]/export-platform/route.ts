@@ -1,0 +1,81 @@
+import { NextRequest, NextResponse } from "next/server";
+import { getDataDir } from "@backend/shared/paths";
+import { ffmpegBin } from "@backend/shared/ffmpeg-path";
+import { join } from "path";
+import { existsSync } from "fs";
+import { exec } from "child_process";
+import { promisify } from "util";
+import { getDb } from "@backend/db";
+import { compositions } from "@backend/db/schema";
+import { eq, desc } from "drizzle-orm";
+import { PLATFORM_SPECS } from "@backend/core/publish/platform-specs";
+
+const execAsync = promisify(exec);
+
+// 各平台目标尺寸（单一事实来源见 platform-specs.ts，含 TikTok Shop）
+const PLATFORM_SIZE = PLATFORM_SPECS;
+
+/**
+ * 把成片重编码到指定平台比例。
+ * 用「模糊填充」：放大裁切的模糊背景 + 等比适配的前景居中叠加，
+ * 既不裁掉字幕/贴片，也不留黑边（带货短视频常见处理）。
+ */
+export async function POST(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  try {
+    const { id } = await params;
+    if (!/^[a-zA-Z0-9-]+$/.test(id)) {
+      return NextResponse.json({ error: "无效的项目ID" }, { status: 400 });
+    }
+    const { platform } = await req.json();
+    const target = PLATFORM_SIZE[platform];
+    if (!target) {
+      return NextResponse.json({ error: "不支持的平台" }, { status: 400 });
+    }
+
+    // 取最新成片
+    const db = getDb();
+    const rows = await db
+      .select()
+      .from(compositions)
+      .where(eq(compositions.projectId, id))
+      .orderBy(desc(compositions.createdAt))
+      .limit(1);
+    const src = rows[0]?.outputPath;
+    if (!src || !existsSync(src)) {
+      return NextResponse.json({ error: "还没有成片，请先合成视频" }, { status: 400 });
+    }
+
+    const { w, h } = target;
+    const outFile = join(getDataDir(), "output", id, `${platform}-${Date.now()}.mp4`);
+    // 模糊填充：[bg]放大裁切+模糊；[fg]等比适配；居中叠加
+    const filter =
+      `[0:v]scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},boxblur=24:4[bg];` +
+      `[0:v]scale=${w}:${h}:force_original_aspect_ratio=decrease[fg];` +
+      `[bg][fg]overlay=(W-w)/2:(H-h)/2`;
+    // -map_metadata 0 显式保留源片元数据（关键：把 AIGC 隐式合规标识带到平台导出片——用户真正上传的是这条）
+    const cmd =
+      `"${ffmpegBin()}" -y -i "${src}" -filter_complex "${filter}" ` +
+      `-map_metadata 0 -c:v libx264 -preset medium -crf 20 -pix_fmt yuv420p -movflags +faststart ` +
+      `-c:a aac -b:a 192k "${outFile}"`;
+
+    await execAsync(cmd, { maxBuffer: 50 * 1024 * 1024 });
+
+    const fileName = outFile.split("/").pop() ?? "";
+    return NextResponse.json({
+      success: true,
+      platform,
+      platformName: target.name,
+      url: `/api/output/${id}/${fileName}`,
+      size: `${w}x${h}`,
+    });
+  } catch (error) {
+    console.error("多平台导出失败:", error);
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "导出失败" },
+      { status: 500 }
+    );
+  }
+}

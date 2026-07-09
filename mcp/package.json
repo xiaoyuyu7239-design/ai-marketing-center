@@ -1,0 +1,42 @@
+{
+  "name": "ai-marketing-center-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for AI Marketing Center — drive the keyless AI 带货/short-video pipeline (create_video, generate_script, list_voices, get_video …) from any MCP client. Thin stdio wrapper over a running AI Marketing Center instance; stock + Edge-TTS are keyless, only script generation needs an LLM key.",
+  "type": "module",
+  "bin": {
+    "clipforge-mcp": "clipforge-mcp.mjs"
+  },
+  "files": [
+    "clipforge-mcp.mjs",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "mcp-server",
+    "video",
+    "short-video",
+    "tiktok",
+    "douyin",
+    "ecommerce",
+    "ai-video",
+    "text-to-video",
+    "ffmpeg",
+    "ai-marketing-center"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xiaoyuyu7239-design/ai-marketing-center",
+    "directory": "mcp"
+  },
+  "homepage": "https://github.com/xiaoyuyu7239-design/ai-marketing-center/tree/main/mcp",
+  "bugs": "https://github.com/xiaoyuyu7239-design/ai-marketing-center/issues",
+  "license": "AGPL-3.0",
+  "author": "xiaoyuyu7239-design"
+}

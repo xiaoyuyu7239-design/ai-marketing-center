@@ -1,0 +1,439 @@
+import { NextRequest, NextResponse } from "next/server";
+import { getDataDir } from "@backend/shared/paths";
+import { ffprobeBin, ffmpegBin } from "@backend/shared/ffmpeg-path";
+import { join } from "path";
+import { existsSync } from "fs";
+import { mkdir, writeFile } from "fs/promises";
+import { generateSpeech, type TTSConfig } from "@backend/core/media/tts";
+import { generateSpeechFree, DEFAULT_FREE_VOICE } from "@backend/core/media/edge-tts";
+import { readTtsCache, ttsCacheKey, writeTtsCache } from "@backend/core/media/tts-cache";
+import { resolveRenderProfile, isRenderPreset } from "@backend/core/media/compose-presets";
+import { getDb } from "@backend/db";
+import { scripts as scriptsTable, assets as assetsTable, projects, compositions } from "@backend/db/schema";
+import { eq } from "drizzle-orm";
+import { composeVideo, FADE_DURATION, chunkCaption, resolveChineseFontFamily, type ClipInput, type ComposeConfig } from "@backend/video-composer/composer";
+import { buildKaraokeAss } from "@backend/video-composer/karaoke";
+import { isAudibleFromVolumedetect } from "@backend/video-composer/audio-probe";
+import { buildComplianceOverlays } from "@backend/core/publish/compliance-overlays";
+import { fetchFreeBgm, moodQueryForCategory, moodQueryForMood } from "@backend/core/media/free-bgm";
+import type { Shot } from "@backend/db/schema";
+import { desc, and } from "drizzle-orm";
+import { runAgentOperation, type AgentRuntimeConfig } from "@server/admin/agents";
+import { getTTSProviderMeta, type TTSProvider } from "@backend/core/media/tts-presets";
+
+const composeErrorById = new Map<string, string>();
+const MAX_ERROR_LEN = 800;
+
+function readableComposeError(e: unknown): string {
+  const msg = e instanceof Error ? e.message : String(e || "视频合成失败");
+  return msg.length > MAX_ERROR_LEN ? `${msg.slice(0, MAX_ERROR_LEN)}...` : msg;
+}
+
+function normalizeAgentTTSProvider(provider: string | undefined): TTSProvider {
+  switch ((provider || "").toLowerCase()) {
+    case "atlas":
+    case "atlas-cloud":
+      return "atlas";
+    case "falai":
+    case "fal-ai":
+      return "falai";
+    case "minimax":
+      return "minimax";
+    default:
+      return "openai";
+  }
+}
+
+function agentConfigToTTSConfig(config: AgentRuntimeConfig): TTSConfig {
+  const provider = normalizeAgentTTSProvider(config.provider);
+  const meta = getTTSProviderMeta(provider);
+  const apiKey = config.apiKey?.trim();
+  const baseUrl = (config.baseUrl || meta.baseUrl).trim();
+  const model = (config.model || meta.defaultModel).trim();
+  const voice = (config.voice || meta.defaultVoice).trim();
+  if (!apiKey) throw new Error("ttsAgent 未配置 API Key");
+  if (!baseUrl || !model || !voice) throw new Error("ttsAgent 模型策略缺少 baseUrl、model 或 voice");
+  return {
+    provider,
+    baseUrl,
+    apiKey,
+    model,
+    voice,
+    ...(config.speed != null && { speed: config.speed }),
+    ...(config.groupId ? { groupId: config.groupId } : {}),
+  };
+}
+
+// 获取该项目最新一条合成记录（导出页读取真实成片）
+export async function GET(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  try {
+    const { id } = await params;
+    const db = getDb();
+    // 可选 ?compositionId：精确取某一次合成（A/B 多变体顺序重渲时按 id 轮询，避免 GET 返回 latest 的竞态串号）
+    const compositionId = req.nextUrl.searchParams.get("compositionId");
+    const rows = compositionId
+      ? await db
+          .select()
+          .from(compositions)
+          .where(and(eq(compositions.projectId, id), eq(compositions.id, compositionId)))
+          .limit(1)
+      : await db
+          .select()
+          .from(compositions)
+          .where(eq(compositions.projectId, id))
+          .orderBy(desc(compositions.createdAt))
+          .limit(1);
+    if (rows.length === 0) {
+      return NextResponse.json({ composition: null });
+    }
+    const c = rows[0];
+    const fileName = (c.outputPath ?? "").split("/").pop() ?? "";
+    return NextResponse.json({
+      composition: {
+        ...c,
+        fileName,
+        url: fileName ? `/api/output/${id}/${fileName}` : null,
+        errorMessage: c.status === "failed" ? composeErrorById.get(c.id) ?? null : null,
+      },
+    });
+  } catch (error) {
+    console.error("获取合成记录失败:", error);
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "获取合成记录失败" },
+      { status: 500 }
+    );
+  }
+}
+
+/** 把 /api/files/{pid}/{file} 形式的访问路径还原为本地磁盘绝对路径 */
+function toLocalPath(fileRef: string | undefined): string | undefined {
+  if (!fileRef) return undefined;
+  const m = fileRef.match(/\/api\/files\/(.+)/);
+  if (!m) return undefined;
+  const p = join(getDataDir(), "uploads", m[1]);
+  return existsSync(p) ? p : undefined;
+}
+
+/** 按镜头类型给商品原图分镜分配一个默认运镜 */
+function defaultMotion(shot: Shot): string {
+  if (shot.motion) return shot.motion;
+  switch (shot.type) {
+    case "hook":
+      return "zoom_in_slow";
+    case "product_reveal":
+      return "ken_burns";
+    case "demo":
+      return "pan_right";
+    case "cta":
+      return "static";
+    default:
+      return "ken_burns";
+  }
+}
+
+// 合成视频：读取已选脚本分镜 + 已生成素材，用 FFmpeg 合成带运镜与中文字幕的成片
+export async function POST(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  try {
+    const { id } = await params;
+    const body = await req.json().catch(() => ({}));
+    const db = getDb();
+
+    // 读取项目（拿商品图兜底）与已选脚本
+    const projRows = await db.select().from(projects).where(eq(projects.id, id));
+    if (projRows.length === 0) {
+      return NextResponse.json({ error: "项目不存在" }, { status: 404 });
+    }
+    const project = projRows[0];
+    const productImages = (project.productImages ?? []) as string[];
+
+    const scriptRows = await db.select().from(scriptsTable).where(eq(scriptsTable.projectId, id));
+    const selected = scriptRows.find((s) => s.selected) ?? scriptRows[0];
+    if (!selected || !Array.isArray(selected.shots) || selected.shots.length === 0) {
+      return NextResponse.json({ error: "尚未生成脚本，无法合成" }, { status: 400 });
+    }
+    const shots = selected.shots as Shot[];
+
+    // 已生成的素材（assets 表，按 shotId 索引）
+    const assetRows = await db.select().from(assetsTable).where(eq(assetsTable.projectId, id));
+    const assetByShot = new Map<number, string>();
+    for (const a of assetRows) {
+      if (a.filePath) assetByShot.set(a.shotId, a.filePath);
+    }
+
+    // TTS 由服务端后台策略控制：前端只提交是否开启，不能传 provider/model/key/baseUrl。
+    const useAgentTts = body.tts?.enabled === true;
+    // 免费配音兜底（微软 Edge keyless TTS，无需 Key）：未配付费 TTS 或付费 TTS 失败时仍能出声。
+    const freeTts = body.freeTts as { enabled?: boolean; voice?: string; rate?: string } | undefined;
+    const useFreeTts = freeTts?.enabled === true;
+    const freeVoice = freeTts?.voice || DEFAULT_FREE_VOICE;
+    const freeRate = typeof freeTts?.rate === "string" ? freeTts.rate : undefined;
+    const ttsDir = join(getDataDir(), "uploads", id, "tts");
+    if (useAgentTts || useFreeTts) await mkdir(ttsDir, { recursive: true });
+
+    /** 探测视频文件是否带「可听见」的音轨（自带语音/音效）；仅静音/空轨不算，让免费 TTS 旁白照常生效 */
+    async function videoHasAudio(filePath: string): Promise<boolean> {
+      try {
+        const { exec } = await import("child_process");
+        const { promisify } = await import("util");
+        const execAsync = promisify(exec);
+        // 1) 先看有没有音频流
+        const { stdout } = await execAsync(
+          `"${ffprobeBin()}" -v error -select_streams a -show_entries stream=codec_type -of csv=p=0 "${filePath}"`
+        );
+        if (stdout.trim().length === 0) return false;
+        // 2) 有流再用 volumedetect 看是否真有声音（静音轨按无音频处理，避免吞掉 TTS 旁白）
+        const { stderr } = await execAsync(
+          `"${ffmpegBin()}" -i "${filePath}" -af volumedetect -f null -`
+        );
+        return isAudibleFromVolumedetect(stderr);
+      } catch {
+        return false;
+      }
+    }
+
+    /** 探测媒体时长（秒），失败返回 0 */
+    async function probeDuration(filePath: string): Promise<number> {
+      try {
+        const { exec } = await import("child_process");
+        const { promisify } = await import("util");
+        const execAsync = promisify(exec);
+        const { stdout } = await execAsync(
+          `"${ffprobeBin()}" -v error -show_entries format=duration -of csv=p=0 "${filePath}"`
+        );
+        return parseFloat(stdout.trim()) || 0;
+      } catch {
+        return 0;
+      }
+    }
+
+    /** 为某分镜生成配音并落地为本地 mp3，返回绝对路径；失败返回 undefined（不阻断合成） */
+    async function buildVoiceover(shotId: number, text: string): Promise<string | undefined> {
+      if (!text || (!useAgentTts && !useFreeTts)) return undefined;
+      const file = join(ttsDir, `shot-${shotId}.mp3`);
+
+      if (useAgentTts) {
+        try {
+          const audio = await runAgentOperation(
+            "ttsAgent",
+            `${id}:tts:${shotId}`,
+            async (config) => generateSpeech(text, agentConfigToTTSConfig(config)),
+          );
+          await writeFile(file, audio);
+          return file;
+        } catch (e) {
+          if (!useFreeTts) {
+            console.warn(`分镜 ${shotId} 后台配音生成失败（已跳过）:`, e);
+            return undefined;
+          }
+          console.warn(`分镜 ${shotId} 后台配音失败，改用免费配音兜底:`, e);
+        }
+      }
+
+      try {
+        const freeCacheKey = ttsCacheKey({
+          provider: "edge-free",
+          voice: freeVoice,
+          rate: freeRate,
+          text,
+        });
+        const cached = await readTtsCache(freeCacheKey);
+        const audio = cached ?? await generateSpeechFree(text, { voice: freeVoice, rate: freeRate });
+        if (!cached) await writeTtsCache(freeCacheKey, audio);
+        await writeFile(file, audio);
+        return file;
+      } catch (e) {
+        console.warn(`分镜 ${shotId} 免费配音生成失败（已跳过）:`, e);
+        return undefined;
+      }
+    }
+
+    // 廉价预检：至少一个分镜有可用素材（避免返回 202 后才发现没素材）
+    const hasAnyAsset = shots.some((s) => toLocalPath(assetByShot.get(s.shotId) ?? productImages[0]));
+    if (!hasAnyAsset) {
+      return NextResponse.json(
+        { error: "没有可用素材，请先在素材步骤生成素材或上传商品图" },
+        { status: 400 }
+      );
+    }
+
+    // 渲染质量预设（快速/标准/高清）→ 分辨率 + 编码参数；只有「合法」预设才顶替 body.resolution，
+    // 否则非法预设字符串会静默把用户显式选的 720p 顶成 1080p。
+    const validPreset = isRenderPreset(body.renderPreset) ? body.renderPreset : undefined;
+    const profile = resolveRenderProfile(validPreset);
+    const resolution: "720p" | "1080p" = validPreset
+      ? profile.resolution
+      : body.resolution === "720p"
+        ? "720p"
+        : "1080p";
+    const outputCfg = {
+      resolution,
+      aspectRatio: (["9:16", "16:9", "1:1"].includes(body.aspectRatio) ? body.aspectRatio : "9:16") as "9:16" | "16:9" | "1:1",
+      videoPreset: profile.videoPreset,
+      crf: profile.crf,
+    };
+
+    // 立即建合成记录(composing)并返回；重活(TTS+FFmpeg)后台异步跑，前端轮询 GET 获取结果
+    const [comp] = await db
+      .insert(compositions)
+      .values({ projectId: id, resolution: outputCfg.resolution, aspectRatio: outputCfg.aspectRatio, status: "composing" })
+      .returning();
+    composeErrorById.delete(comp.id);
+    await db.update(projects).set({ status: "composing", updatedAt: new Date() }).where(eq(projects.id, id));
+
+    // 后台异步合成（不阻塞请求，避免长视频超时）
+    void (async () => {
+     try {
+    // 构建渲染分镜：跳过无素材的；有 TTS 配音时按配音实际时长卡点（字幕/贴片/画面严格对齐）
+    const rendered: { shot: Shot; clip: ClipInput; duration: number }[] = [];
+    const missing: number[] = [];
+    for (const shot of shots) {
+      // 素材优先级：该分镜已生成素材 → 商品原图兜底
+      const ref = assetByShot.get(shot.shotId) ?? productImages[0];
+      const local = toLocalPath(ref);
+      if (!local) {
+        missing.push(shot.shotId);
+        continue;
+      }
+      // 视频素材 vs 静态图：视频自带音轨时用模型原生语音，不再叠 TTS（避免双重声音）
+      // 注意：免费素材库（Wikimedia）也会返回 .ogv 等容器，必须纳入视频判定，否则被当静态图 → 冻结帧 + 丢音轨
+      const isVideo = /\.(mp4|webm|mov|m4v|ogv|ogg|mkv|avi)$/i.test(local);
+      const nativeAudio = isVideo ? await videoHasAudio(local) : false;
+      const audioPath =
+        shot.voiceover && !nativeAudio ? await buildVoiceover(shot.shotId, shot.voiceover) : undefined;
+
+      // 有效时长：有配音→按配音实际长度+0.4s 尾留白卡点（限 1.5~20s）；否则用脚本时长
+      let duration = shot.duration || 3;
+      if (audioPath) {
+        const ttsDur = await probeDuration(audioPath);
+        if (ttsDur > 0) duration = Math.min(Math.max(ttsDur + 0.4, 1.5), 20);
+      }
+
+      const clip: ClipInput = {
+        type: isVideo ? "video" : "image",
+        filePath: local,
+        duration,
+        transition: shot.transition || "ai_start_end",
+        ...(isVideo ? { hasAudio: nativeAudio } : { motion: defaultMotion(shot) }),
+        ...(audioPath && { audioPath }),
+      };
+      rendered.push({ shot, clip, duration });
+    }
+
+    if (rendered.length === 0) throw new Error("没有可用素材");
+
+    const clips = rendered.map((r) => r.clip);
+
+    // 字幕 + 文字贴片：按渲染分镜的有效时长累计，与画面时间轴严格对齐（修复缺素材导致的漂移 + 字幕卡配音）
+    let acc = 0;
+    const subtitleTexts: { text: string; startTime: number; endTime: number }[] = [];
+    const karaokeLines: { text: string; startTime: number; endTime: number }[] = [];
+    const overlays: { text: string; style: "title" | "highlight" | "price"; startTime: number; endTime: number }[] = [];
+    rendered.forEach((r, idx) => {
+      // 与 composer 的 xfade 时间轴严格一致：ffmpeg_fade 转入的片段与前段重叠 FADE_DURATION，整条时间轴前移，
+      // 否则字幕/贴片会比对应画面晚 0.5s/转场亮起（渐进漂移）。
+      if (idx > 0 && r.clip.transition === "ffmpeg_fade") acc -= FADE_DURATION;
+      const start = acc;
+      acc += r.duration;
+      const end = acc;
+      // 把整句旁白切成 rapid 短句卡（每段一闪），适配 muted 观看 / 带货留存
+      if (r.shot.voiceover) {
+        subtitleTexts.push(...chunkCaption(r.shot.voiceover, start, end));
+        karaokeLines.push({ text: r.shot.voiceover, startTime: start, endTime: end }); // 卡拉OK整句留屏逐字高亮
+      }
+      const ov = r.shot.textOverlay;
+      if (ov && ov.style !== "subtitle" && ov.text) {
+        overlays.push({ text: ov.text, style: ov.style as "title" | "highlight" | "price", startTime: start, endTime: end });
+      }
+    });
+
+    // 可选叠加：AI 生成合规标识（TikTok/抖音 2025 末起要求）+ 片尾购买 CTA（带货转化），按 body 开关
+    overlays.push(
+      ...buildComplianceOverlays(
+        {
+          aiDisclosure: body.aiDisclosure === true,
+          disclosureText: typeof body.disclosureText === "string" ? body.disclosureText : undefined,
+          ctaText: typeof body.ctaText === "string" ? body.ctaText : undefined,
+        },
+        acc
+      )
+    );
+
+    // 背景音乐（可选）：① 用户上传的 bgmPath；② freeBgm=true 时自动取一条免费 CC 音乐。合成时混入并自动压低。
+    let bgmLocal = body.bgmPath ? toLocalPath(body.bgmPath) : undefined;
+    if (!bgmLocal && body.freeBgm === true) {
+      // 配乐情绪：① 用户在视频页显式选的 bgmMood 优先；② 否则按商品品类自动挑（美妆→upbeat / 美食→warm…）
+      const moodQuery =
+        typeof body.bgmMood === "string" && body.bgmMood
+          ? moodQueryForMood(body.bgmMood)
+          : moodQueryForCategory(project.productCategory);
+      const free = await fetchFreeBgm(id, moodQuery);
+      if (free) {
+        bgmLocal = free.localPath;
+        // CC 音乐多需署名：记录来源，便于导出 credits / 用户在成片署名（CC BY 等）
+        console.info(`[bgm] 免费配乐: ${free.author} · ${free.license} · ${free.sourceUrl}`);
+      }
+    }
+
+    const config: ComposeConfig = {
+      projectId: id,
+      clips,
+      output: {
+        ...outputCfg,
+        ...(bgmLocal && { bgmPath: bgmLocal, bgmVolume: 0.18, bgmDuck: body.bgmDuck === true }),
+      },
+      subtitle: subtitleTexts.length > 0 ? { texts: subtitleTexts, position: "bottom" } : undefined,
+      overlays: overlays.length > 0 ? overlays : undefined,
+    };
+
+    // 卡拉OK逐字字幕（opt-in）：把每镜整句旁白写成 ASS \k 卡拉OK，libass 烧录，替代 rapid 短句卡
+    if (body.karaoke === true && karaokeLines.length > 0) {
+      const ass = buildKaraokeAss(karaokeLines, { fontName: resolveChineseFontFamily() });
+      const assDir = join(getDataDir(), "output", id);
+      await mkdir(assDir, { recursive: true });
+      const assPath = join(assDir, `karaoke_${comp.id}.ass`);
+      await writeFile(assPath, ass, "utf8");
+      config.subtitle = { texts: [], karaokeAssPath: assPath };
+    }
+
+    // 商品卡贴片（opt-in）：用商品图首图 + 商品名做左下角挂车卡
+    if (body.productCard === true) {
+      const cardImg = toLocalPath(productImages[0]);
+      if (cardImg) {
+        config.productCard = {
+          imagePath: cardImg,
+          name: (project.productName as string) || project.name || undefined,
+          price: (project.productPrice as string) || undefined,
+        };
+      }
+    }
+
+        // 执行合成（FFmpeg）
+        const outputPath = await composeVideo(config);
+        // 完成：更新合成记录与项目状态
+        await db.update(compositions).set({ outputPath, status: "done" }).where(eq(compositions.id, comp.id));
+        await db.update(projects).set({ status: "done", updatedAt: new Date() }).where(eq(projects.id, id));
+      } catch (e) {
+        const errorMessage = readableComposeError(e);
+        composeErrorById.set(comp.id, errorMessage);
+        console.error("后台合成失败:", e);
+        await db.update(compositions).set({ status: "failed" }).where(eq(compositions.id, comp.id)).catch(() => {});
+        await db.update(projects).set({ status: "video", updatedAt: new Date() }).where(eq(projects.id, id)).catch(() => {});
+      }
+    })();
+
+    // 立即返回，前端轮询 GET /api/project/[id]/compose 直到 status=done/failed
+    return NextResponse.json({ compositionId: comp.id, status: "composing" }, { status: 202 });
+  } catch (error) {
+    console.error("视频合成失败:", error);
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "视频合成失败" },
+      { status: 500 }
+    );
+  }
+}

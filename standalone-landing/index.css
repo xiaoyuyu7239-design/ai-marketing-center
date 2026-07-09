@@ -1,0 +1,49 @@
+@import "tailwindcss";
+@config "../tailwind.config.js";
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  min-height: 100%;
+  background: #0a0608;
+}
+
+body {
+  min-height: 100%;
+  margin: 0;
+  background: #0a0608;
+  color: #ffffff;
+  font-family: "Imprima", sans-serif;
+  scrollbar-gutter: stable;
+}
+
+#root {
+  min-height: 100%;
+}
+
+img,
+svg {
+  display: block;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+@keyframes bobUp {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+
+  50% {
+    transform: translateY(-6px);
+  }
+}
