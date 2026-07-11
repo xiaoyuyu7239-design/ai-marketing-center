@@ -1,12 +1,12 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { useProductLibraryStore } from "../product-library-store";
-import { useTemplateStore } from "../template-store";
-import { useBrandStore } from "../brand-store";
-import { useCharacterStore, useProjectStore } from "../project-store";
-import type { ProductItem } from "../product-library-store";
-import type { ScriptTemplate } from "../template-store";
-import type { Character } from "../project-store";
-import type { Shot } from "@/lib/db/schema";
+import { useProductLibraryStore } from "@frontend/stores/product-library-store";
+import { useTemplateStore } from "@frontend/stores/template-store";
+import { useBrandStore } from "@frontend/stores/brand-store";
+import { useCharacterStore, useProjectStore } from "@frontend/stores/project-store";
+import type { ProductItem } from "@frontend/stores/product-library-store";
+import type { ScriptTemplate } from "@frontend/stores/template-store";
+import type { Character } from "@frontend/stores/project-store";
+import type { Shot } from "@backend/db/schema";
 
 // ==================== 商品库 Store 测试 ====================
 

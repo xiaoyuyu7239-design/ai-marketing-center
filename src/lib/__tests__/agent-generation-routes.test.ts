@@ -27,7 +27,7 @@ vi.mock("@backend/script-engine/generator", () => ({
   generateTopicScript: mocks.generateTopicScript,
 }));
 
-vi.mock("@/lib/providers", () => ({
+vi.mock("@backend/providers", () => ({
   createProvider: mocks.createProvider,
 }));
 

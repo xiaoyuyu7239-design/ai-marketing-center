@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isSupportedImageFile } from "../image-file";
+import { isSupportedImageFile } from "@backend/shared/image-file";
 
 describe("isSupportedImageFile", () => {
   it("accepts standard image MIME types", () => {
