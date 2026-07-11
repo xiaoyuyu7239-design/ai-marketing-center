@@ -1,6 +1,6 @@
 "use client";
 
-import { type CSSProperties, type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -84,8 +84,6 @@ const showcaseRows = Array.from({ length: Math.ceil(showcaseItems.length / 3) },
   showcaseItems.slice(index * 3, index * 3 + 3)
 );
 
-const userSessionKey = "clipforge_user_session";
-
 const qualityOptions: { value: "standard" | "hd"; label: string; resolution: AgentResolution; renderPreset: RenderPreset }[] = [
   { value: "standard", label: "标准", resolution: "720p", renderPreset: "fast" },
   { value: "hd", label: "高清", resolution: "1080p", renderPreset: "hd" },
@@ -124,22 +122,6 @@ function publishHref(project: GenerationProject) {
   return `/project/${project.id}/export?publishReady=1`;
 }
 
-function hasSavedUserSession() {
-  try {
-    return typeof window !== "undefined" && window.localStorage?.getItem(userSessionKey) !== null;
-  } catch {
-    return false;
-  }
-}
-
-function saveUserSession(phone: string) {
-  try {
-    window.localStorage?.setItem(userSessionKey, JSON.stringify({ phone, loggedAt: new Date().toISOString() }));
-  } catch {
-    // 登录态仅用于当前前端体验；存储不可用时仍允许用户进入创作界面。
-  }
-}
-
 export default function AgentProjectPage() {
   const router = useRouter();
   const locale = useLocale();
@@ -171,11 +153,6 @@ export default function AgentProjectPage() {
   const [publishPickSource, setPublishPickSource] = useState<"llm" | "rule">("rule");
   const [historyPanelOpen, setHistoryPanelOpen] = useState(false);
   const [loginOpen, setLoginOpen] = useState(false);
-  const [isUserLoggedIn, setIsUserLoggedIn] = useState(false);
-  const [phone, setPhone] = useState("");
-  const [verificationCode, setVerificationCode] = useState("");
-  const [codeSent, setCodeSent] = useState(false);
-  const [agreed, setAgreed] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsHydrated, setSettingsHydrated] = useState(false);
   const [generationSettings, setGenerationSettings] = useState<AgentGenerationSettings>(DEFAULT_AGENT_GENERATION_SETTINGS);
@@ -221,10 +198,6 @@ export default function AgentProjectPage() {
   useEffect(() => {
     imagesRef.current = images;
   }, [images]);
-
-  useEffect(() => {
-    setIsUserLoggedIn(hasSavedUserSession());
-  }, []);
 
   useEffect(() => {
     const saved = parseStoredAgentGenerationSettings(
@@ -310,7 +283,6 @@ export default function AgentProjectPage() {
   const primaryImage = images[0];
   const extraImages = images.slice(1, 4);
   const hiddenExtraImageCount = Math.max(0, images.length - 4);
-  const canLogin = phone.trim().length > 0 && verificationCode.trim().length > 0 && agreed;
   const fallbackPendingPublishItems = useMemo(
     () => rankTodayPublishCandidates(historyItems, approvedVideos, dailyPickCount, publishPickStrategy, new Date(), publishedVideos),
     [approvedVideos, dailyPickCount, historyItems, publishedVideos, publishPickStrategy]
@@ -423,15 +395,6 @@ export default function AgentProjectPage() {
       renderPreset: quality.renderPreset,
       resolution: quality.resolution,
     }));
-  };
-
-  const handleLoginSubmit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!canLogin) return;
-    saveUserSession(phone.trim());
-    setIsUserLoggedIn(true);
-    setLoginOpen(false);
-    router.replace("/project/agent");
   };
 
   const handleSubmit = async () => {
@@ -576,17 +539,12 @@ export default function AgentProjectPage() {
         <div className="flex flex-col items-center gap-6 text-[#747B86]">
           <button
             type="button"
-            onClick={() => {
-              if (isUserLoggedIn) {
-                router.replace("/project/agent");
-                return;
-              }
-              setLoginOpen(true);
-            }}
+            onClick={() => setLoginOpen(true)}
             className="rounded-md px-1 py-1 text-[13px] font-extrabold tracking-[0.08em] text-[#6B7280] transition hover:text-[#111111] xl:text-[14px]"
-            aria-label={isUserLoggedIn ? "进入我的创作界面" : "登录"}
+            aria-label="查看登录状态"
+            aria-haspopup="dialog"
           >
-            {isUserLoggedIn ? "我的" : "登录"}
+            登录
           </button>
           <Menu className="size-5 xl:size-6" />
         </div>
@@ -718,7 +676,12 @@ export default function AgentProjectPage() {
 
       {loginOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 px-4 py-8">
-          <div className="relative w-full max-w-[520px] rounded-[24px] bg-white px-7 py-7 text-[#111111] shadow-[0_24px_70px_rgba(0,0,0,0.24)] sm:px-8">
+          <div
+            className="relative w-full max-w-[520px] rounded-[24px] bg-white px-7 py-7 text-[#111111] shadow-[0_24px_70px_rgba(0,0,0,0.24)] sm:px-8"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="public-login-title"
+          >
             <button
               type="button"
               onClick={() => setLoginOpen(false)}
@@ -732,70 +695,23 @@ export default function AgentProjectPage() {
               <BrandWheatMark className="h-8 w-7 text-[#111111]" />
               <span>绘卖AI</span>
             </div>
-            <h2 className="mt-3 text-[28px] font-black leading-tight tracking-normal text-[#111111]">
-              欢迎登录绘卖
+            <h2 id="public-login-title" className="mt-3 text-[28px] font-black leading-tight tracking-normal text-[#111111]">
+              登录尚未开放
             </h2>
-
-            <form className="mt-8 space-y-5" onSubmit={handleLoginSubmit}>
-              <label className="block">
-                <span className="text-[15px] font-extrabold text-[#111111]">手机号</span>
-                <input
-                  value={phone}
-                  onChange={(event) => setPhone(event.target.value)}
-                  type="tel"
-                  inputMode="tel"
-                  autoFocus
-                  placeholder="请输入手机号"
-                  className="mt-2.5 h-12 w-full rounded-xl border-0 bg-[#F0F0F1] px-4 text-[16px] font-semibold text-[#111111] outline-none placeholder:text-[#9BA3AD]"
-                />
-              </label>
-
-              <label className="block">
-                <span className="text-[15px] font-extrabold text-[#111111]">验证码</span>
-                <div className="mt-2.5 flex h-12 overflow-hidden rounded-xl bg-[#F0F0F1]">
-                  <input
-                    value={verificationCode}
-                    onChange={(event) => setVerificationCode(event.target.value)}
-                    inputMode="numeric"
-                    placeholder="请输入验证码"
-                    className="min-w-0 flex-1 border-0 bg-transparent px-4 text-[16px] font-semibold text-[#111111] outline-none placeholder:text-[#9BA3AD]"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setCodeSent(true)}
-                    disabled={phone.trim().length === 0}
-                    className="m-1 min-w-[112px] rounded-xl border border-white bg-white/70 px-3 text-[14px] font-extrabold text-[#B2B7BE] transition enabled:text-[#6B7280] enabled:hover:text-[#111111] disabled:cursor-not-allowed"
-                  >
-                    {codeSent ? "已发送" : "发送验证码"}
-                  </button>
-                </div>
-              </label>
-
-              <button
-                type="submit"
-                disabled={!canLogin}
-                className="h-12 w-full rounded-xl bg-[#D9DDE2] text-[16px] font-extrabold text-white transition enabled:bg-[#111111] enabled:hover:bg-[#2B2B2B] disabled:cursor-not-allowed"
-              >
-                登录
-              </button>
-
-              <label className="flex cursor-pointer items-center gap-3 text-[13px] font-semibold text-[#5F6874]">
-                <input
-                  type="checkbox"
-                  checked={agreed}
-                  onChange={(event) => setAgreed(event.target.checked)}
-                  className="peer sr-only"
-                />
-                <span className="grid size-5 shrink-0 place-items-center rounded-md border-2 border-[#728095] text-white peer-checked:border-[#111111] peer-checked:bg-[#111111]">
-                  <span className="text-[12px] leading-none">✓</span>
-                </span>
-                <span>
-                  已阅读并同意<span className="font-extrabold text-[#111111]">用户服务协议</span>、
-                  <span className="font-extrabold text-[#111111]">隐私政策</span>、
-                  <span className="font-extrabold text-[#111111]">AI功能使用须知</span>
-                </span>
-              </label>
-            </form>
+            <p className="mt-6 text-[15px] font-semibold leading-7 text-[#5F6874]">
+              尚未配置真实登录服务。为避免伪登录和数据误认，手机号、验证码和本地身份入口已关闭。
+            </p>
+            <p className="mt-3 rounded-xl bg-[#F0F1F3] px-4 py-3 text-[13px] font-semibold leading-6 text-[#6B7280]">
+              确定首发登录方式并接入服务端会话后，这里才会重新开放。
+            </p>
+            <button
+              type="button"
+              onClick={() => setLoginOpen(false)}
+              className="mt-6 h-12 w-full rounded-xl bg-[#111111] text-[16px] font-extrabold text-white transition hover:bg-[#2B2B2B]"
+              autoFocus
+            >
+              知道了
+            </button>
           </div>
         </div>
       )}

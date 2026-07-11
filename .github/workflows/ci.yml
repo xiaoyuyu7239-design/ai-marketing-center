@@ -40,6 +40,9 @@ jobs:
       - name: 代码规范检查
         run: pnpm lint
 
+      - name: TypeScript 类型检查
+        run: pnpm typecheck
+
       - name: 单元测试
         run: pnpm test
 

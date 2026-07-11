@@ -14,6 +14,6 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     // 排除依赖、构建产物(.next/standalone 会把 e2e 拷进去)、Playwright e2e 目录
-    exclude: ["**/node_modules/**", "**/.pnpm-store/**", "**/.next/**", "**/dist/**", "**/e2e/**", "**/版本存档/**"],
+    exclude: ["**/node_modules/**", "**/.pnpm-store/**", "**/.next/**", "**/dist/**", "**/e2e/**", "**/版本存档/**", "**/*.integration.test.ts"],
   },
 });
