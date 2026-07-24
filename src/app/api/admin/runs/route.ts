@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isAdminRequest } from "@server/admin/admin-auth";
-import { getAgentStrategy } from "@server/admin/agents";
+import { getAgentStrategy, publicAgents } from "@server/admin/agents";
 
 function runsPayload(state: Awaited<ReturnType<typeof getAgentStrategy>>) {
   return {
-    agents: state.agents,
+    agents: publicAgents(state.agents),
     runs: state.runs,
   };
 }

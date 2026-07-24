@@ -6,7 +6,8 @@
  * 让译制版沿用同样的画面，只换声音与字幕。纯 prompt/解析可单测，LLM 调用复用脚本生成同一条路径。
  */
 
-import OpenAI from "openai";
+import type OpenAI from "openai";
+import { createSafeOpenAIClient } from "@backend/shared/openai-client";
 import { FREE_TTS_VOICES } from "@backend/core/media/edge-tts";
 import { estimateDurationSec } from "@backend/core/script/script-import";
 import type { Shot } from "@backend/db/schema";
@@ -79,7 +80,7 @@ export function parseTranslations(text: string, expectedCount: number): string[]
 
 function createClient(cfg: DubLLMConfig): OpenAI {
   // 本地/免费端点（Ollama/Pollinations）无需真 Key，缺省给占位符（SDK 要求非空）
-  return new OpenAI({ baseURL: cfg.baseUrl, apiKey: cfg.apiKey || "no-key" });
+  return createSafeOpenAIClient({ baseURL: cfg.baseUrl, apiKey: cfg.apiKey || "no-key" });
 }
 
 /** 调 LLM 把旁白批量翻成目标语种，返回等长译文数组（解析失败抛错）。 */

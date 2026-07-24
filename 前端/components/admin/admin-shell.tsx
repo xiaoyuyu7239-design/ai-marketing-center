@@ -8,14 +8,20 @@ import {
   ClipboardList,
   FileText,
   Gauge,
+  Siren,
   LogOut,
+  ShieldCheck,
   Sparkles,
+  Store,
 } from "lucide-react";
 import { Button } from "@frontend/components/ui/button";
 import { cn } from "@backend/shared/utils";
 
 const nav = [
   { href: "/admin", label: "系统状态", icon: Gauge },
+  { href: "/admin/ops", label: "运维告警", icon: Siren },
+  { href: "/admin/merchants", label: "商家管理", icon: Store },
+  { href: "/admin/review", label: "内容审核", icon: ShieldCheck },
   { href: "/admin/agents", label: "Agent 配置", icon: Bot },
   { href: "/admin/prompts", label: "提示词管理", icon: FileText },
   { href: "/admin/model-evals", label: "模型评测", icon: Sparkles },

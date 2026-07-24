@@ -12,7 +12,9 @@ import { getDataDir } from "@backend/shared/paths";
  * 纯函数、便于单测（无需触盘）。返回安全绝对路径，或 null（非 /api/files 路径 / 路径穿越）。
  */
 export function resolveUploadFilePath(ref: string): string | null {
-  const m = ref.match(/\/api\/files\/(.+)/);
+  // 必须锚定 ^：不锚定时 `/api/output/<自己id>/api/files/<受害id>/x.jpg` 会匹配内嵌的 /api/files/ 段，
+  // 令归属校验（按 URL 首段）与真实读盘路径（按内嵌段）口径不一致，被绕过跨租户读文件。
+  const m = ref.match(/^\/api\/files\/(.+)$/);
   if (!m) return null;
   const uploadsRoot = join(getDataDir(), "uploads");
   const filePath = join(uploadsRoot, m[1]);

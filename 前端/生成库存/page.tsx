@@ -35,15 +35,26 @@ import {
   type GenerationProject,
   type RankedPublishCandidate,
 } from "@frontend/lib/generation-records";
+import { goldenTimeHint } from "@backend/core/publish/golden-time";
+import { WeeklyReport } from "@frontend/components/weekly-report";
 
 export default function ProductsPage() {
   const approvedVideos = useVideoApprovalStore((state) => state.approved);
   const publishedVideos = useVideoApprovalStore((state) => state.published);
+  const rejectedVideos = useVideoApprovalStore((state) => state.rejected);
   const unapproveProject = useVideoApprovalStore((state) => state.unapproveProject);
+  const hydrateApprovalStore = useVideoApprovalStore((state) => state.hydrateFromServer);
+  const approvalHydrated = useVideoApprovalStore((state) => state.hydrated);
+  const authRequired = useVideoApprovalStore((state) => state.authRequired);
   const dailyPickCount = useVideoApprovalStore((state) => state.dailyPickCount);
   const setDailyPickCount = useVideoApprovalStore((state) => state.setDailyPickCount);
   const publishPickStrategy = useVideoApprovalStore((state) => state.publishPickStrategy);
   const setPublishPickStrategy = useVideoApprovalStore((state) => state.setPublishPickStrategy);
+
+  // 认可入库/发布状态存服务端，进页面先水合
+  useEffect(() => {
+    void hydrateApprovalStore();
+  }, [hydrateApprovalStore]);
 
   const [projects, setProjects] = useState<GenerationProject[]>([]);
   const [loading, setLoading] = useState(true);
@@ -52,6 +63,24 @@ export default function ProductsPage() {
   const [todayRankedItems, setTodayRankedItems] = useState<RankedPublishCandidate[]>([]);
   const [isRankingToday, setIsRankingToday] = useState(false);
   const [todayRankSource, setTodayRankSource] = useState<"llm" | "rule">("rule");
+  const [goldenHint, setGoldenHint] = useState<string | null>(null);
+  // 本地门店商家：黄金时段用"到店决策时刻"窗口（如餐饮=饭点前）
+  const [isLocalStoreMerchant, setIsLocalStoreMerchant] = useState(false);
+
+  useEffect(() => {
+    let ignore = false;
+    fetch("/api/auth/me", { cache: "no-store" })
+      .then(async (res) => {
+        if (ignore || !res.ok) return;
+        const data = await res.json().catch(() => ({}));
+        const storeType = data.merchant?.storeType;
+        if (!ignore) setIsLocalStoreMerchant(storeType === "local" || storeType === "both");
+      })
+      .catch(() => undefined);
+    return () => {
+      ignore = true;
+    };
+  }, []);
 
   useEffect(() => {
     let ignore = false;
@@ -85,8 +114,36 @@ export default function ProductsPage() {
     [approvedVideos, dailyPickCount, projects, publishedVideos, publishPickStrategy]
   );
   const todayItems = todayRankedItems.length > 0 ? todayRankedItems : fallbackTodayItems;
+
+  // 黄金发布时间提示：按今日第一条候选的品类算；放 effect 里避免 SSR/客户端时钟不一致的水合警告
+  useEffect(() => {
+    if (todayItems.length === 0) {
+      setGoldenHint(null);
+      return;
+    }
+    // 先用本地行业模板立即出提示，服务端版（数据攒够后按自家回流校准）到了再升级覆盖；未登录/请求失败就停在本地版
+    setGoldenHint(goldenTimeHint(todayItems[0]?.project.productCategory, new Date(), { localStore: isLocalStoreMerchant }).hint);
+    let ignore = false;
+    fetch("/api/reminders/settings", { cache: "no-store" })
+      .then(async (res) => {
+        if (ignore || !res.ok) return;
+        const data = await res.json().catch(() => ({}));
+        if (!ignore && typeof data.hint === "string" && data.hint) setGoldenHint(data.hint);
+      })
+      .catch(() => undefined);
+    return () => {
+      ignore = true;
+    };
+  }, [todayItems, isLocalStoreMerchant]);
   const completedCount = useMemo(() => projects.filter(isProjectComplete).length, [projects]);
-  const hasLowInventory = !loading && isLowGenerationInventory(approvedInventoryTotal);
+  // 服务端数据未水合完成前不判断库存不足，避免页面加载瞬间闪一次错误告警
+  const hasLowInventory = approvalHydrated && !loading && isLowGenerationInventory(approvedInventoryTotal);
+  // 被运营驳回的内容（连原因），配上项目标题展示给商家，解释"这条为什么不见了"
+  const rejectedList = useMemo(() => {
+    return Object.values(rejectedVideos)
+      .map((r) => ({ ...r, project: projects.find((p) => p.id === r.projectId) }))
+      .filter((r) => r.project);
+  }, [rejectedVideos, projects]);
 
   useEffect(() => {
     let ignore = false;
@@ -104,13 +161,11 @@ export default function ProductsPage() {
 
     async function rankTodayItems() {
       try {
+        // 项目与入库/发布状态服务端已有权威数据，只需传数量与策略
         const res = await fetch("/api/llm/publish-ranker", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            projects,
-            approved: approvedVideos,
-            published: publishedVideos,
             count: dailyPickCount,
             strategy: publishPickStrategy,
           }),
@@ -185,6 +240,19 @@ export default function ProductsPage() {
       </header>
 
       <main className="mx-auto max-w-7xl px-6 py-10">
+        {authRequired && (
+          <section className="mb-6 rounded-2xl border border-[#E2C58E] bg-[#FFF9EE] p-5 shadow-sm">
+            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+              <div>
+                <p className="text-sm font-black text-[#6B4E11]">还没有登录</p>
+                <p className="mt-1 text-sm font-semibold text-[#8A6A24]">登录后才能看到你的生成库存和今日待发布，下面的数据当前是空的。</p>
+              </div>
+              <Link href="/project/agent">
+                <Button className="bg-[#111111] text-white hover:bg-[#2B2B2B]">去创作工作台登录</Button>
+              </Link>
+            </div>
+          </section>
+        )}
         <section className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
           <div>
             <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-[#DDE2E8] bg-white px-3 py-1 text-xs font-black text-[#596170]">
@@ -222,6 +290,25 @@ export default function ProductsPage() {
           </div>
         </section>
 
+        {/* 账号周报：近 7 天数据 + 复盘经验汇总成大白话（数据飞轮的账号级视角） */}
+        <WeeklyReport />
+
+        {rejectedList.length > 0 && (
+          <section className="mt-6 rounded-2xl border border-[#F0C9C9] bg-[#FDF3F3] p-5 shadow-sm">
+            <div className="flex items-center gap-2 text-sm font-black text-[#8A2A2A]">
+              <PackageCheck className="size-4" />
+              <span>{rejectedList.length} 条内容被平台驳回</span>
+            </div>
+            <ul className="mt-3 space-y-2">
+              {rejectedList.map((r) => (
+                <li key={r.projectId} className="text-sm font-semibold text-[#9A4A4A]">
+                  「{projectTitle(r.project!)}」{r.reviewNote ? `：${r.reviewNote}` : "（未填写原因，可联系客服了解）"}
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+
         {hasLowInventory && (
           <section className="mt-6 rounded-2xl border border-[#E2E5EA] bg-white p-5 shadow-sm">
             <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
@@ -246,12 +333,15 @@ export default function ProductsPage() {
 
         <section className="mt-6 rounded-2xl border border-[#E2E5EA] bg-white p-5 shadow-sm">
           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <CalendarCheck className="size-5 text-[#111111]" />
               <h2 className="text-lg font-black">待发布</h2>
               <Badge variant="secondary" className="bg-[#EEF1F4] text-[#5E6875]">
                 今日
               </Badge>
+              {goldenHint && (
+                <span className="text-xs font-bold text-[#68717E]">{goldenHint}</span>
+              )}
             </div>
             <div className="flex flex-wrap items-center justify-end gap-2">
               <div className="flex items-center gap-2">

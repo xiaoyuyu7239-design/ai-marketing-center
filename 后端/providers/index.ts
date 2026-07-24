@@ -10,6 +10,7 @@ import { VolcEngineProvider } from './volcengine'
 import { ReplicateProvider } from './replicate'
 import { AlibabaProvider } from './alibaba'
 import { SiliconFlowProvider } from './siliconflow'
+import { ZhipuProvider } from './zhipu'
 
 // ==================== Provider 注册表 ====================
 
@@ -58,6 +59,13 @@ registerProvider({
   displayName: '硅基流动',
   description: '硅基流动推理平台，支持 FLUX、SD3.5、万相等多种开源模型',
   factory: (config) => new SiliconFlowProvider(config),
+})
+
+registerProvider({
+  name: 'zhipu',
+  displayName: '智谱 AI',
+  description: '智谱 bigmodel 平台，CogVideoX-Flash 免费图生视频（允许真人人脸首帧）',
+  factory: (config) => new ZhipuProvider(config),
 })
 
 registerProvider({
@@ -144,9 +152,21 @@ export type {
   GenerationMode,
 } from './types'
 
-export { BaseProvider, ProviderError } from './base'
+export {
+  BaseProvider,
+  ProviderError,
+  classifyProviderError,
+  toSafeProviderErrorDto,
+} from './base'
+export type {
+  ProviderErrorCategory,
+  ProviderErrorOptions,
+  ProviderErrorSuggestedAction,
+  SafeProviderErrorDto,
+} from './base'
 export { AtlasCloudProvider } from './atlas-cloud'
 export { FalAIProvider } from './fal-ai'
 export { VolcEngineProvider } from './volcengine'
 export { AlibabaProvider } from './alibaba'
 export { SiliconFlowProvider } from './siliconflow'
+export { ZhipuProvider } from './zhipu'

@@ -4,7 +4,7 @@ import { AdminShell } from "@frontend/components/admin/admin-shell";
 import { isAdminSession, isDefaultAdminPassword } from "@server/admin/admin-auth";
 
 export const metadata: Metadata = {
-  title: "工作人员后台 | ClipForge",
+  title: "工作人员后台 | 绘卖AI",
 };
 
 export default async function AdminLayout({ children }: { children: React.ReactNode }) {

@@ -1,0 +1,10 @@
+{
+  "name": "huimai-rag-embed",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "可选神经编码器子工具（bge-small-zh via transformers.js），素材 RAG 语义排序升级项；默认不启用",
+  "dependencies": {
+    "@xenova/transformers": "^2.17.2"
+  }
+}

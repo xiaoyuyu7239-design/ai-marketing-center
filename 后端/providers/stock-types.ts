@@ -5,12 +5,14 @@
  * 各源（Pexels/Pixabay/Openverse…）把自家响应归一化为同一个 StockCandidate，
  * 然后统一下载到 data/uploads 落 assets 表，被 composer 当普通 video/image/audio 片段消费。
  */
+import { readResponseBuffer, safeFetchPinned } from "@backend/shared/ssrf-guard";
 
 /** 已接入的素材源 id（local = 项目自带本地 B-roll 池；nasa/archive = 公共领域档案影像，显式选用） */
 export type StockSourceId = "pexels" | "pixabay" | "openverse" | "wikimedia" | "local" | "nasa" | "archive";
 
 export type StockMediaType = "video" | "image" | "audio";
 export type StockOrientation = "portrait" | "landscape" | "square";
+export type PersistedStockAssetType = "user_upload" | "stock_footage";
 
 /** 统一的素材候选（各源都归一到这个结构） */
 export interface StockCandidate {
@@ -136,6 +138,14 @@ export function orientationOf(width: number, height: number): StockOrientation {
   return "square";
 }
 
+/**
+ * local 候选来自本项目 materials 目录，是商家自己上传的素材，不是第三方版权库。
+ * 若误存为 stock_footage，后续合规门禁会要求一个并不存在的公开来源页。
+ */
+export function persistedAssetTypeForStockSource(source: StockSourceId): PersistedStockAssetType {
+  return source === "local" ? "user_upload" : "stock_footage";
+}
+
 /** 按时长过滤候选（图片不过滤） */
 export function filterByDuration(
   candidates: StockCandidate[],
@@ -177,13 +187,9 @@ export function inferExtension(url: string, contentType?: string | null, mediaTy
 
 /** 带超时的 fetch */
 export async function fetchWithTimeout(url: string, init: RequestInit = {}): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  try {
-    return await fetch(url, { ...init, signal: controller.signal });
-  } finally {
-    clearTimeout(timer);
-  }
+  const timeoutSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+  const signal = init.signal ? AbortSignal.any([init.signal, timeoutSignal]) : timeoutSignal;
+  return safeFetchPinned(url, { ...init, signal });
 }
 
 /** 下载结果 */
@@ -214,7 +220,7 @@ export async function downloadStockFile(
     const st = await stat(srcPath);
     if (st.size > MAX_DOWNLOAD_BYTES) throw new Error(`素材体积 ${st.size} 超过上限 ${MAX_DOWNLOAD_BYTES}`);
     const localExt = inferExtension(srcPath, null, mediaType);
-    const destPath = join(destDir, `${safeBaseName}.${localExt}`);
+    const destPath = join(/* turbopackIgnore: true */ destDir, `${safeBaseName}.${localExt}`);
     await copyFile(srcPath, destPath);
     return { filePath: destPath, bytes: st.size };
   }
@@ -228,14 +234,11 @@ export async function downloadStockFile(
     throw new Error(`素材体积 ${declaredLen} 超过上限 ${MAX_DOWNLOAD_BYTES}`);
   }
 
-  const buffer = Buffer.from(await res.arrayBuffer());
-  if (buffer.byteLength > MAX_DOWNLOAD_BYTES) {
-    throw new Error(`素材体积 ${buffer.byteLength} 超过上限 ${MAX_DOWNLOAD_BYTES}`);
-  }
+  const buffer = await readResponseBuffer(res, MAX_DOWNLOAD_BYTES);
 
   const ext = inferExtension(url, contentType, mediaType);
   // safeBaseName 已在函数顶部净化（去路径分隔符/特殊字符，防目录穿越）
-  const filePath = join(destDir, `${safeBaseName}.${ext}`);
+  const filePath = join(/* turbopackIgnore: true */ destDir, `${safeBaseName}.${ext}`);
   await writeFile(filePath, buffer);
   return { filePath, bytes: buffer.byteLength };
 }

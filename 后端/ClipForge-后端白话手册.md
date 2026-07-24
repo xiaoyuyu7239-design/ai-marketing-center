@@ -190,4 +190,3 @@ pnpm build
 | `src/lib/providers/stock-registry.ts` | 素材源 switch 集中。 | 新源只加一个清晰分支，测试覆盖。 |
 | `src/app/api/project/[id]/compose/route.ts` | 合成入参和后台任务集中。 | 新合成选项先抽纯函数，减少大文件冲突。 |
 | `src/lib/video-composer/composer.ts` | FFmpeg 命令很长。 | 改前先写测试，改动按视频/音频/字幕分块。 |
-

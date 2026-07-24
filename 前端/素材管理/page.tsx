@@ -7,7 +7,7 @@ import Link from "next/link";
 import { Card, CardContent } from "@frontend/components/ui/card";
 import { Button } from "@frontend/components/ui/button";
 import { Badge } from "@frontend/components/ui/badge";
-import { buildImageOptions, buildVideoOptions } from "@backend/shared/gen-params";
+import { buildImageOptions } from "@backend/shared/gen-params";
 import type { Shot } from "@backend/db/schema";
 import { buildAssetRows, shouldOfferStockFill, needsImageModelWarning, type AssetItem } from "@backend/core/stock/assets-view";
 import { useT } from "@frontend/i18n";
@@ -15,9 +15,8 @@ import { LanguageToggle } from "@frontend/components/language-toggle";
 import { BrandWheatMark } from "@frontend/components/brand-wheat-logo";
 import { SHOT_TYPE_INFO } from "@backend/shared/shot-constants";
 import { StepProgressIndicator } from "@frontend/components/step-progress";
+import { createBatchGenerationOperation, newGenerationOperationId } from "@frontend/lib/generation-operation";
 
-// 会"展示商品"的分镜类型：开启商品保真时，这些 AI 分镜走 image-to-image（用商品图重绘，锁定主体）
-const PRODUCT_SHOT_TYPES = new Set(["product_reveal", "demo", "cta"]);
 
 export default function AssetsPage() {
   const t = useT("assets");
@@ -25,24 +24,22 @@ export default function AssetsPage() {
   const tRef = useRef(t);
   tRef.current = t;
   const { id } = useParams<{ id: string }>();
-  const workflowStepHrefs = [`/project/${id}/script`, `/project/${id}/assets`, `/project/${id}/video`, `/project/${id}/export`];
+  const workflowStepHrefs = [`/project/${id}/script`, `/project/${id}/assets`, `/project/${id}/motion`, `/project/${id}/video`, `/project/${id}/export`];
 
   const [assets, setAssets] = useState<AssetItem[]>([]);
   const [productImages, setProductImages] = useState<string[]>([]);
   // 商品保真：AI 生成展示商品的分镜时，用商品原图作参考重绘，避免 AI 篡改商品（带货命门）
   const [productSafe, setProductSafe] = useState(true);
-  // 出图后自动「图生视频」转成真动态镜头（i2v 质量主路，替掉假 Ken-Burns 运镜）。仅配了视频模型时生效。
-  const [autoMotion, setAutoMotion] = useState(true);
   const [projectName, setProjectName] = useState("");
   // 项目类型：topic（无商品一句话成片）走免费素材库自动配画面
   const [contentType, setContentType] = useState<string>("");
   const [imageAgentReady, setImageAgentReady] = useState(false);
   const [videoAgentReady, setVideoAgentReady] = useState(false);
-  // 正在转动态镜头的分镜
-  const [motionShots, setMotionShots] = useState<Set<number>>(new Set());
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isBatchGenerating, setIsBatchGenerating] = useState(false);
+  // 批量生成的失败摘要：失败卡片可能在折叠区外，必须在顶部横幅给出肉眼可见的原因（如配额用完）
+  const [batchError, setBatchError] = useState<string | null>(null);
   // 「自动配画面（免费素材）」状态
   const [isFillingStock, setIsFillingStock] = useState(false);
   const [stockMsg, setStockMsg] = useState<string | null>(null);
@@ -169,89 +166,31 @@ export default function AssetsPage() {
     }
   }, [id, isFillingStock, reloadAssets, t]);
 
-  // 转动态镜头：用该分镜已生成的图作首帧，调图生视频模型，结果存为该分镜素材（视频）
-  const generateMotion = useCallback(
-    async (shotId: number, firstFrameOverride?: string) => {
-      const asset = assets.find((a) => a.shotId === shotId);
-      // 首帧优先用传入的新鲜 URL：自动接力时 React state 还没刷新，闭包里的 thumbnailUrl 是旧的
-      const firstFrame = firstFrameOverride || asset?.thumbnailUrl;
-      if (!firstFrame) return;
-      if (!videoAgentReady) {
-        setAssets((prev) =>
-          prev.map((a) => (a.shotId === shotId ? { ...a, error: t("errorNoVideoModel") } : a))
-        );
-        return;
-      }
-      setMotionShots((prev) => new Set(prev).add(shotId));
-      try {
-        const res = await fetch("/api/ai/video", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            mode: "image-to-video",
-            prompt: asset?.prompt || asset?.description,
-            imageUrl: firstFrame,
-            // 用户自定义视频参数（比例/分辨率/时长/帧率/运动/种子/反向词）
-            options: buildVideoOptions(undefined),
-          }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || t("errorImageToVideoFailed"));
-        const url = data.videoUrls?.[0];
-        if (!url) throw new Error(t("errorEmptyResult"));
-        // 存为该分镜素材（视频会被下载到本地），compose 会按视频片段处理（含原生音轨检测）
-        const saveRes = await fetch(`/api/project/${id}/assets`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            shotId, type: "ai_generate", sourceUrl: url,
-            prompt: asset?.prompt,
-          }),
-        });
-        let savedUrl = url;
-        if (saveRes.ok) {
-          const saved = await saveRes.json();
-          if (saved.filePath) savedUrl = saved.filePath;
-        }
-        setAssets((prev) =>
-          prev.map((a) => (a.shotId === shotId ? { ...a, status: "done", thumbnailUrl: savedUrl, isVideo: true, error: undefined } : a))
-        );
-      } catch (e) {
-        setAssets((prev) =>
-          prev.map((a) => (a.shotId === shotId ? { ...a, error: e instanceof Error ? e.message : t("errorImageToVideoFailed") } : a))
-        );
-      } finally {
-        setMotionShots((prev) => {
-          const next = new Set(prev);
-          next.delete(shotId);
-          return next;
-        });
-      }
-    },
-    [assets, videoAgentReady, id, t]
-  );
-
-  // 真实生成单个素材
+  // 真实生成单个素材（只出分镜图；转动态在下一步「动态」页进行）
   const generateOne = useCallback(
-    async (shotId: number) => {
+    async (shotId: number, batchOperationId?: string) => {
       const asset = assets.find((a) => a.shotId === shotId);
       if (!asset) return;
+
+      // 用户传了多张商品图时，各分镜轮流取不同的图，避免整片只体现第一张——
+      // 多角度/多卖点都用上，各段画面也就有了差异（只传 1 张则各段仍用同一张，行为不变）。
+      const shotIndex = assets.findIndex((a) => a.shotId === shotId);
+      const productImg =
+        productImages[(shotIndex >= 0 ? shotIndex : 0) % Math.max(1, productImages.length)] ?? productImages[0];
 
       // 商品原图分镜：直接用商品图，无需调用 AI（落库供合成读取）
       if (asset.visualSource === "product_image") {
         setAssets((prev) =>
           prev.map((a) =>
-            a.shotId === shotId ? { ...a, status: "done", thumbnailUrl: productImages[0] } : a
+            a.shotId === shotId ? { ...a, status: "done", thumbnailUrl: productImg } : a
           )
         );
-        if (productImages[0]) {
+        if (productImg) {
           fetch(`/api/project/${id}/assets`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ shotId, type: "product_image", sourceUrl: productImages[0] }),
+            body: JSON.stringify({ shotId, type: "product_image", sourceUrl: productImg }),
           }).catch(() => {});
-          // 自动转动态：商品原图当首帧跑图生视频（让真货动起来），失败自动回退静图
-          if (autoMotion && videoAgentReady) await generateMotion(shotId, productImages[0]);
         }
         return;
       }
@@ -265,80 +204,129 @@ export default function AssetsPage() {
               : a
           )
         );
-        return;
+        return t("errorNoImageModel");
       }
 
       setAssets((prev) => prev.map((a) => (a.shotId === shotId ? { ...a, status: "generating", error: undefined } : a)));
 
-      // 商品保真：展示商品的 AI 分镜 + 有商品图 + 开关开 → 用商品图重绘（image-to-image，锁定商品主体）
-      const useProductSafe =
-        productSafe && !!productImages[0] && PRODUCT_SHOT_TYPES.has(asset.type);
+      // 分镜图生成：所有 AI 分镜都以用户上传图为参考做 image-to-image（保持主体一致），
+      // 按脚本镜头描述换角度/动作/构图/场景，生成"每镜不同但同一主体"的分镜图 —— 解决"画面单一"。
+      // 只有完全没有可参考图时才退回 text-to-image。
+      const useProductSafe = productSafe && !!productImg;
       const genMode = useProductSafe ? "image-to-image" : "text-to-image";
       const basePrompt = asset.prompt || asset.description;
+      // 无脸构图硬约束：分镜图带清晰正脸会被视频平台人脸风控拦下、整镜只能留静图。
+      // 这条不能指望 LLM 在脚本里自觉遵守（实测会漏），在生成入口统一追加；
+      // 放在 prompt 最前（生图模型对开头权重最高）并中英双语强化，压过英文构图描述里的 face 类词。
+      const FACELESS_RULE =
+        "【最高优先级】画面绝不出现完整清晰的正脸：只用背影、侧影、颈部以下、手部/下半身局部特写，或让头发、动作、构图自然遮挡面部。Strictly no visible face: shoot from behind, side profile, or neck-down crop only. " +
+        "画面遵循真实物理：每个物体有可信支撑（被手拿着或放在台面上），绝不悬空漂浮；商品保持真实小物尺寸，不在场景中巨大化。Every object must rest on a surface or be held by a hand — nothing floats; keep the product at its real-world scale. ";
       const genPrompt = useProductSafe
-        ? `${basePrompt}。严格保持商品的外观、包装、颜色、logo 和文字完全不变，只重绘符合描述的场景、背景与光线。`
-        : basePrompt;
+        ? `${FACELESS_RULE}以参考图中的商品/人物为准，严格保持其身份、外观、服装、颜色、logo 完全一致（是同一件商品、同一个人）；在此前提下按这个镜头重新构图：${basePrompt}。可改变角度、姿态、动作、景别与场景背景，但绝不改变商品本身。`
+        : `${FACELESS_RULE}${basePrompt}`;
 
       try {
+        const operationId = batchOperationId || newGenerationOperationId("image-single");
         const res = await fetch("/api/ai/image", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
+            projectId: id,
             mode: genMode,
             prompt: genPrompt,
-            ...(useProductSafe && { imageUrl: productImages[0] }),
+            ...(useProductSafe && { imageUrl: productImg }),
             // 用户自定义图片参数（比例→尺寸/数量/步数/引导/种子/反向词）
             options: buildImageOptions(undefined),
+            operationId,
+            operationType: batchOperationId ? "image-batch" : "image-single",
+            itemKey: `shot:${shotId}`,
           }),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || t("errorGenerateFailed"));
         const url = data.imageUrls?.[0];
         if (!url) throw new Error(t("errorEmptyResult"));
-        // 落库（远程图会被下载到本地），供合成读取真实 AI 素材
-        let savedUrl = url;
-        try {
-          const saveRes = await fetch(`/api/project/${id}/assets`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              shotId, type: "ai_generate", sourceUrl: url,
-              prompt: asset.prompt,
-            }),
-          });
-          if (saveRes.ok) {
-            const saved = await saveRes.json();
-            if (saved.filePath) savedUrl = saved.filePath;
-          }
-        } catch {
-          // 落库失败不影响预览（仅合成时会回退商品图兜底）
+        // 落库（远程图会被下载到本地）是成功的一部分。不能在下载失败时把
+        // 短效外链标成 done，否则刷新后分镜会丢失，动态任务也无法绑定真实文件 hash。
+        const saveRes = await fetch(`/api/project/${id}/assets`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            shotId, type: "ai_generate", sourceUrl: url,
+            prompt: asset.prompt,
+          }),
+        });
+        const saved = await saveRes.json().catch(() => ({}));
+        if (!saveRes.ok || typeof saved.filePath !== "string" || !saved.filePath) {
+          throw new Error(typeof saved.error === "string" ? saved.error : t("errorPersistAssetFailed"));
         }
+        const savedUrl = saved.filePath;
         setAssets((prev) =>
-          prev.map((a) => (a.shotId === shotId ? { ...a, status: "done", thumbnailUrl: savedUrl } : a))
+          prev.map((a) => (a.shotId === shotId ? {
+            ...a,
+            status: "done",
+            thumbnailUrl: savedUrl,
+            assetFileUrl: savedUrl,
+            assetId: typeof saved.id === "string" ? saved.id : undefined,
+            assetType: typeof saved.type === "string" ? saved.type : "ai_generated",
+            assetPrompt: typeof saved.prompt === "string" ? saved.prompt : asset.prompt,
+          } : a))
         );
-        // 自动转动态：刚生成的图当首帧跑图生视频（真运镜替掉假 Ken-Burns），失败自动回退静图
-        if (autoMotion && videoAgentReady) await generateMotion(shotId, savedUrl);
       } catch (e) {
+        const message = e instanceof Error ? e.message : t("errorGenerateFailed");
         setAssets((prev) =>
           prev.map((a) =>
-            a.shotId === shotId ? { ...a, status: "failed", error: e instanceof Error ? e.message : t("errorGenerateFailed") } : a
+            a.shotId === shotId ? { ...a, status: "failed", error: message } : a
           )
         );
+        return message;
       }
     },
-    [assets, imageAgentReady, productImages, productSafe, autoMotion, videoAgentReady, generateMotion, id, t]
+    [assets, imageAgentReady, productImages, productSafe, id, t]
   );
 
-  // 一键全部生成（串行，避免并发打满平台限流）
+  // 阶段一「一键生成分镜图」：只出图不转动态——先审分镜宫格、把不满意的图重生成好，
+  // 再进入阶段二统一转动态。坏图直接转动态只会浪费时间和视频额度（垃圾进垃圾出）。
   const generateAll = useCallback(async () => {
     const pending = assets.filter((a) => a.status === "pending" || a.status === "failed");
     if (pending.length === 0) return;
     setIsBatchGenerating(true);
-    for (const asset of pending) {
-      await generateOne(asset.shotId);
+    setBatchError(null);
+    const aiPending = pending.filter((asset) => asset.visualSource !== "product_image");
+    const aiShotIds = new Set(aiPending.map((asset) => asset.shotId));
+    const operationId = aiPending.length > 0 ? newGenerationOperationId("image-batch") : undefined;
+    if (operationId) {
+      try {
+        await createBatchGenerationOperation({
+          projectId: id,
+          kind: "image",
+          operationId,
+          itemKeys: aiPending.map((asset) => `shot:${asset.shotId}`),
+        });
+      } catch (error) {
+        setBatchError(error instanceof Error ? error.message : "创建批量生成任务失败");
+        setIsBatchGenerating(false);
+        return;
+      }
+    }
+    const failures: Array<{ shotId: number; message: string }> = [];
+    // 两条流水线并行；更高并发会撞生图服务限流，得不偿失
+    const queue = pending.map((a) => a.shotId);
+    const worker = async () => {
+      for (let sid = queue.shift(); sid !== undefined; sid = queue.shift()) {
+        const err = await generateOne(sid, aiShotIds.has(sid) ? operationId : undefined);
+        if (err) failures.push({ shotId: sid, message: err });
+      }
+    };
+    await Promise.all([worker(), worker()]);
+    // 失败原因提到顶部横幅并点名镜号：失败卡片可能在折叠区外，只写在卡片上用户不知道是哪几镜
+    if (failures.length > 0) {
+      const shots = [...new Set(failures.map((f) => f.shotId))].sort((a, b) => a - b).join("、");
+      setBatchError(t("batchFailedBanner", { shots, reason: failures[0].message }));
     }
     setIsBatchGenerating(false);
-  }, [assets, generateOne]);
+  }, [assets, generateOne, id, t]);
+
 
   return (
     <div className="workflow-light min-h-screen grid-bg">
@@ -359,7 +347,7 @@ export default function AssetsPage() {
             {/* 步骤胶囊在窄屏放不下，移动端隐藏（仅进度展示、非导航） */}
             <div className="hidden sm:flex items-center gap-1">
             <StepProgressIndicator
-              steps={[t("stepScript"), t("stepAssets"), t("stepVideo"), t("stepExport")]}
+              steps={[t("stepScript"), t("stepAssets"), t("stepMotion"), t("stepVideo"), t("stepExport")]}
               activeIndex={1}
               hrefs={workflowStepHrefs}
               backLabel={tc("backPrevStep")}
@@ -428,21 +416,6 @@ export default function AssetsPage() {
                       <span className={`h-2 w-2 rounded-full ${productSafe ? "bg-primary" : "bg-muted-foreground/40"}`} />
                     </button>
                   )}
-                  {videoAgentReady && (
-                    <button
-                      type="button"
-                      onClick={() => setAutoMotion((v) => !v)}
-                      title={t("autoMotionTip")}
-                      className={`flex h-9 w-full items-center justify-between rounded-md border px-3 text-xs font-medium transition-all ${
-                        autoMotion
-                          ? "border-primary bg-primary/10 text-primary"
-                          : "border-border/60 bg-muted/20 text-muted-foreground"
-                      }`}
-                    >
-                      <span>{t("autoMotion")}</span>
-                      <span className={`h-2 w-2 rounded-full ${autoMotion ? "bg-primary" : "bg-muted-foreground/40"}`} />
-                    </button>
-                  )}
                 </div>
               </div>
             </details>
@@ -465,22 +438,14 @@ export default function AssetsPage() {
                 </>
               )}
             </Button>
-            <Link href={allDone ? `/project/${id}/video` : "#"} className={!allDone ? "pointer-events-none" : undefined}>
+            <Link href={allDone ? `/project/${id}/motion` : "#"} className={!allDone ? "pointer-events-none" : undefined}>
               <Button className="brand-gradient text-white text-sm" disabled={!allDone}>
-                {t("nextCompose")}
+                {t("nextMotion")}
                 <LuArrowRight className="w-4 h-4 ml-1" />
               </Button>
             </Link>
           </div>
         </div>
-
-        {/* 自动配画面 提示/结果（免费素材，零 Key，topic 成片首选路径） */}
-        {offerStockFill && (
-          <div className="hidden">
-            <LuImage className="w-3.5 h-3.5 text-primary/70 shrink-0" />
-            <span>{stockMsg ?? t("stockFillTip")}</span>
-          </div>
-        )}
 
         {/* 未配置生图模型提示（仅当仍有 AI 分镜待出图） */}
         {showModelWarning && (
@@ -535,11 +500,17 @@ export default function AssetsPage() {
                         ? t("assetsHeroDescNeedStaff")
                         : t("assetsHeroDescWorking", { remaining: remainingCount })}
                     </p>
+                    {batchError && !isBatchGenerating && (
+                      <p className="mt-1.5 text-sm font-medium text-destructive">{batchError}</p>
+                    )}
+                    {stockMsg && !isFillingStock && (
+                      <p className="mt-1.5 text-sm text-muted-foreground">{stockMsg}</p>
+                    )}
                   </div>
                   {allDone ? (
-                    <Link href={`/project/${id}/video`}>
+                    <Link href={`/project/${id}/motion`}>
                       <Button className="brand-gradient text-white text-sm">
-                        {t("nextCompose")}
+                        {t("nextMotion")}
                         <LuArrowRight className="w-4 h-4 ml-1" />
                       </Button>
                     </Link>
@@ -587,15 +558,15 @@ export default function AssetsPage() {
                   </div>
                   <div className="rounded-lg border border-border/50 bg-muted/10 p-3">
                     <p className="text-xs text-muted-foreground">{t("assetResultMotion")}</p>
-                    <p className="mt-1 text-sm font-semibold">{autoMotion && videoAgentReady ? t("assetResultEnabled") : t("assetResultFallback")}</p>
+                    <p className="mt-1 text-sm font-semibold">{videoAgentReady ? t("assetResultEnabled") : t("assetResultFallback")}</p>
                   </div>
                 </div>
                 <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
-                  {assets.slice(0, 5).map((asset) => (
+                  {assets.map((asset) => (
                     <div key={asset.shotId} className="overflow-hidden rounded-lg border border-border/50 bg-muted/20">
                       <div className="relative aspect-[9/12] bg-muted/30">
                         {asset.status === "done" && asset.thumbnailUrl ? (
-                          asset.isVideo ? (
+                          asset.isVideo && /\.(mp4|webm|mov|m4v)$/i.test(asset.thumbnailUrl) ? (
                             <video
                               src={asset.thumbnailUrl}
                               muted
@@ -640,6 +611,26 @@ export default function AssetsPage() {
                             ? t("simpleFailed")
                             : t("simplePending")}
                         </p>
+                        {asset.visualSource === "ai_generate" && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-7 w-full text-xs"
+                            disabled={asset.status === "generating" || isBatchGenerating}
+                            onClick={() => generateOne(asset.shotId)}
+                          >
+                            {asset.status === "generating"
+                              ? t("btnGenerating")
+                              : asset.status === "done"
+                              ? t("btnRegenerate")
+                              : asset.status === "failed"
+                              ? tc("retry")
+                              : t("btnGenerate")}
+                          </Button>
+                        )}
+                        {asset.error && (
+                          <p className="text-[10px] leading-relaxed text-destructive">{asset.error}</p>
+                        )}
                       </div>
                     </div>
                   ))}
@@ -724,7 +715,7 @@ export default function AssetsPage() {
                               variant="outline"
                               size="sm"
                               className="text-xs w-24"
-                              disabled={asset.status === "generating" || motionShots.has(asset.shotId)}
+                              disabled={asset.status === "generating"}
                               onClick={() => generateOne(asset.shotId)}
                             >
                               {asset.status === "generating"
@@ -734,19 +725,6 @@ export default function AssetsPage() {
                                 : asset.status === "failed"
                                 ? tc("retry")
                                 : t("btnGenerate")}
-                            </Button>
-                          )}
-                          {/* 转动态镜头：已有图素材 → 图生视频（真实运镜）。商品特写镜头建议保持静态避免篡改 */}
-                          {asset.status === "done" && asset.thumbnailUrl && !asset.isVideo && (
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="text-xs w-24 text-muted-foreground hover:text-primary"
-                              disabled={motionShots.has(asset.shotId)}
-                              onClick={() => generateMotion(asset.shotId)}
-                              title={t("motionTip")}
-                            >
-                              {motionShots.has(asset.shotId) ? t("btnConvertingMotion") : t("btnConvertMotion")}
                             </Button>
                           )}
                           {asset.isVideo && (

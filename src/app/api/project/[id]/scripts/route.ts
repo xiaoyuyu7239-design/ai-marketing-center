@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getDb } from "@backend/db";
 import { scripts } from "@backend/db/schema";
 import { eq, desc } from "drizzle-orm";
+import { requireMerchant, requireOwnedProject } from "@backend/core/auth/require-merchant";
 
 interface ShotTextPatch {
   shotId: number;
@@ -11,11 +12,15 @@ interface ShotTextPatch {
 
 // 获取某项目的全部脚本方案（脚本页 / 素材页按 projectId 读取真实数据）
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const auth = await requireMerchant(req);
+  if ("error" in auth) return auth.error;
   try {
     const { id } = await params;
+    const owned = await requireOwnedProject(auth.merchant.id, id);
+    if ("error" in owned) return owned.error;
     const db = getDb();
     const rows = await db
       .select()
@@ -37,8 +42,12 @@ export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const auth = await requireMerchant(req);
+  if ("error" in auth) return auth.error;
   try {
     const { id } = await params;
+    const owned = await requireOwnedProject(auth.merchant.id, id);
+    if ("error" in owned) return owned.error;
     const body = await req.json();
 
     const scriptId = body.scriptId as string | undefined;

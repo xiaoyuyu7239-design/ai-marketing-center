@@ -1,0 +1,16 @@
+# Temporary HTTP-only virtual host used by certbot's webroot challenge.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name 124.220.90.186;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/huimai-vercel-acme;
+        default_type text/plain;
+        try_files $uri =404;
+    }
+
+    location / {
+        return 404;
+    }
+}

@@ -1,0 +1,1 @@
+ALTER TABLE `merchants` ADD `quota_bonus` integer DEFAULT 0 NOT NULL;

@@ -9,6 +9,7 @@ import { fillShotStock } from "@backend/core/stock/stock-fill";
 import { shotQuery } from "@backend/core/stock/stock-matcher";
 import { mapWithConcurrency } from "@backend/shared/concurrency";
 import type { StockSourceId, StockMediaType, StockOrientation } from "@backend/providers/stock-types";
+import { requireMerchant, requireOwnedProject } from "@backend/core/auth/require-merchant";
 
 const SAFE_ID = /^[a-zA-Z0-9\-]+$/;
 
@@ -21,10 +22,14 @@ const SAFE_ID = /^[a-zA-Z0-9\-]+$/;
  *  - force=true 时即使该分镜已有 stock 素材也重新配
  */
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const auth = await requireMerchant(req);
+  if ("error" in auth) return auth.error;
   const { id } = await params;
   if (!id || !SAFE_ID.test(id)) {
     return NextResponse.json({ error: "无效的项目ID" }, { status: 400 });
   }
+  const owned = await requireOwnedProject(auth.merchant.id, id);
+  if ("error" in owned) return owned.error;
 
   let body: Record<string, unknown> = {};
   try {

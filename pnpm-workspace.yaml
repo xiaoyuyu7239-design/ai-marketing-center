@@ -1,12 +1,17 @@
 allowBuilds:
-  '@ffprobe-installer/darwin-arm64': set this to true or false
-  better-sqlite3: set this to true or false
-  electron-winstaller: set this to true or false
-  esbuild: set this to true or false
-  ffmpeg-static: set this to true or false
-  msw: set this to true or false
-  sharp: set this to true or false
-  unrs-resolver: set this to true or false
-ignoredBuiltDependencies:
-  - sharp
-  - unrs-resolver
+  '@ffprobe-installer/darwin-arm64': true
+  '@ffprobe-installer/darwin-x64': true
+  '@ffprobe-installer/linux-arm': true
+  '@ffprobe-installer/linux-arm64': true
+  '@ffprobe-installer/linux-ia32': true
+  '@ffprobe-installer/linux-x64': true
+  '@ffprobe-installer/win32-ia32': true
+  '@ffprobe-installer/win32-x64': true
+  better-sqlite3: true
+  electron: true
+  electron-winstaller: false
+  esbuild: true
+  ffmpeg-static: true
+  msw: false
+  sharp: true
+  unrs-resolver: true

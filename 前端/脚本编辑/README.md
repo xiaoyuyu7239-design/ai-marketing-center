@@ -1,6 +1,6 @@
 # 脚本编辑
 
-**路由**: `/project/[id]/script`  
+**路由**: `/project/[id]/script`
 **文件**: `src/app/project/[id]/script/page.tsx` → `前端/脚本编辑/page.tsx`
 
 ## 功能
@@ -18,4 +18,3 @@
 ## 添加新功能
 - 新脚本操作：在操作按钮区添加
 - 新分镜类型：在 `SHOT_TYPE_INFO`（`后端/shared/shot-constants.ts`）中添加
-

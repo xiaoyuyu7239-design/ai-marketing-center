@@ -1,0 +1,18 @@
+proxy_request_buffering on;
+proxy_buffering on;
+proxy_connect_timeout 5s;
+proxy_send_timeout 60s;
+proxy_read_timeout 120s;
+proxy_http_version 1.1;
+proxy_set_header Connection "";
+proxy_set_header Host huimai-ai.vercel.app;
+proxy_set_header X-Forwarded-Host huimai-ai.vercel.app;
+proxy_set_header X-Real-IP $remote_addr;
+proxy_set_header X-Forwarded-For $remote_addr;
+proxy_set_header X-Forwarded-Proto https;
+proxy_set_header Cookie "";
+proxy_set_header Authorization "";
+proxy_set_header CF-Connecting-IP "";
+proxy_set_header True-Client-IP "";
+proxy_set_header Forwarded "";
+proxy_pass http://huimai_app;

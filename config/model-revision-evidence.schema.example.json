@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "endpointHost": "api.provider.example",
+  "model": "immutable-model-or-deployment-id",
+  "deploymentRevision": "immutable-provider-revision",
+  "faultDomain": "provider-owner",
+  "immutable": true,
+  "evidenceType": "provider-console-export",
+  "sourceReference": "redacted-console-export-or-contract-reference",
+  "issuedAt": "2026-07-16T00:00:00.000Z"
+}

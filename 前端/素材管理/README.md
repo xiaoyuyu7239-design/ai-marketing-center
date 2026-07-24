@@ -1,6 +1,6 @@
 # 素材管理
 
-**路由**: `/project/[id]/assets`  
+**路由**: `/project/[id]/assets`
 **文件**: `src/app/project/[id]/assets/page.tsx` → `前端/素材管理/page.tsx`
 
 ## 功能
@@ -17,4 +17,3 @@
 ## 添加新功能
 - 新素材类型：扩展 `AssetItem` 类型
 - 新 AI 模型：在设置中心 → Agent 策略中配置
-

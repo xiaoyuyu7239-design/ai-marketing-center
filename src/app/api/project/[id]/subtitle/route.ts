@@ -3,6 +3,7 @@ import { eq, desc } from "drizzle-orm";
 import { getDb } from "@backend/db";
 import { scripts as scriptsTable } from "@backend/db/schema";
 import { shotsToSrt, shotsToVtt } from "@backend/shared/subtitle-export";
+import { requireMerchant, requireOwnedProject } from "@backend/core/auth/require-merchant";
 
 const SAFE_ID = /^[a-zA-Z0-9\-]+$/;
 
@@ -11,8 +12,12 @@ const SAFE_ID = /^[a-zA-Z0-9\-]+$/;
  * 时间轴按脚本规划时长累加，供创作者二次剪辑 / 平台原生字幕 / 无障碍 / 再校对使用（成片仍内烧字幕）。
  */
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const auth = await requireMerchant(req);
+  if ("error" in auth) return auth.error;
   const { id } = await params;
   if (!id || !SAFE_ID.test(id)) return NextResponse.json({ error: "无效的项目ID" }, { status: 400 });
+  const owned = await requireOwnedProject(auth.merchant.id, id);
+  if ("error" in owned) return owned.error;
 
   const format = new URL(req.url).searchParams.get("format") === "vtt" ? "vtt" : "srt";
 

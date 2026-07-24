@@ -6,7 +6,6 @@ import { Card, CardContent } from "@frontend/components/ui/card";
 import { Button } from "@frontend/components/ui/button";
 import { Badge } from "@frontend/components/ui/badge";
 import { getExampleShowcase, getExampleTemplates } from "@backend/shared/examples";
-import type { Shot } from "@backend/db/schema";
 import { useT, useLocale } from "@frontend/i18n";
 import { LanguageToggle } from "@frontend/components/language-toggle";
 import { SHOT_TYPE_INFO } from "@backend/shared/shot-constants";

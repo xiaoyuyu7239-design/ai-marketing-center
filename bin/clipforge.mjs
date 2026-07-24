@@ -5,6 +5,9 @@
  * 是 ClipForge HTTP API 的薄封装（与 mcp/clipforge-mcp.mjs 同一套编排：DB / FFmpeg / 免费 TTS / 免费素材），
  * 零第三方依赖、纯 Node。需先启动实例（pnpm dev / pnpm start）。素材+配音全程免 Key，只有写脚本要一个 LLM Key。
  *
+ * ⚠️ 多租户改造后 API 需要商家登录。本机单人使用请在启动实例时开启单用户模式：
+ *   CLIPFORGE_SINGLE_USER=1 pnpm dev   （Electron 桌面版已内置开启；多商家部署严禁开启）
+ *
  * 用法：
  *   node bin/clipforge.mjs create --topic "在家手冲咖啡" [--duration 25] [--style knowledge]
  *        [--footage auto|image|video] [--voice <id>] [--aspect 9:16|16:9|1:1]

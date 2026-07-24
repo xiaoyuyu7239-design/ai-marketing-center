@@ -137,3 +137,54 @@ describe("buildPublishPack 商品专属话题标签（2026 商品词搜索发现
     expect(p.hashtags).toContain("#美妆");
   });
 });
+
+describe("buildPublishPack 本地门店（同城形态）", () => {
+  const localStore = {
+    city: "杭州市",
+    landmark: "武林商圈",
+    shopName: "老王牛肉面",
+    storeAddress: "文三路 259 号",
+    customTags: "杭州吃货",
+  };
+
+  it("CTA 是到店动作，绝不出现电商挂车话术", () => {
+    const p = buildPublishPack({ productName: "招牌牛肉面", category: "food", localStore });
+    expect(p.caption).not.toContain("小黄车");
+    expect(p.caption).toContain("评论区扣1");
+    expect(p.caption).toContain("定位");
+  });
+
+  it("标题带城市/商圈锚点", () => {
+    const p = buildPublishPack({ productName: "招牌牛肉面", category: "food", localStore });
+    const joined = p.titles.join("");
+    expect(joined).toContain("武林商圈");
+    expect(joined).toContain("杭州");
+    for (const t of p.titles) expect(Array.from(t).length).toBeLessThanOrEqual(22);
+  });
+
+  it("话题走同城梯度：商品标签置顶 + 城市×品类 + 绑定标签", () => {
+    const p = buildPublishPack({ productName: "招牌牛肉面", category: "food", localStore });
+    expect(p.hashtags[0]).toBe("#招牌牛肉面");
+    expect(p.hashtags).toContain("#杭州美食");
+    expect(p.hashtags).toContain("#杭州吃货");
+    expect(p.hashtags.length).toBeLessThanOrEqual(10);
+    expect(new Set(p.hashtags).size).toBe(p.hashtags.length);
+  });
+
+  it("确定性：同输入同输出", () => {
+    const a = buildPublishPack({ productName: "招牌牛肉面", category: "food", localStore });
+    const b = buildPublishPack({ productName: "招牌牛肉面", category: "food", localStore });
+    expect(a).toEqual(b);
+  });
+
+  it("en locale 忽略同城形态（同城是中文语境专属），不受 localStore 影响", () => {
+    const p = buildPublishPack({ productName: "Glow Serum", category: "beauty", locale: "en", localStore });
+    expect(/[一-鿿]/.test(p.titles.join(" ") + p.caption)).toBe(false);
+  });
+
+  it("不传 localStore 的电商链路完全不变（回归保护）", () => {
+    const p = buildPublishPack({ productName: "云柔抽纸", category: "home" });
+    expect(p.caption).toContain("小黄车");
+    expect(p.titles.join("")).not.toContain("同城");
+  });
+});

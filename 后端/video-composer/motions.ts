@@ -2,6 +2,11 @@
 // 用于商品展示镜头，不让 AI 碰商品图，用运动模板代替
 import { interpolate } from "./easing";
 
+// zoompan 的取景框按整数像素取整，直接在输出分辨率上运镜会产生肉眼可见的抖动（经典 zoompan shake）。
+// 先超采样放大 3 倍再运镜，取整误差被压到亚像素级，画面平滑；s= 参数会把输出缩回目标分辨率。
+const SUPERSAMPLE = 3;
+const ss = (w: number, h: number) => `scale=${w * SUPERSAMPLE}:${h * SUPERSAMPLE}:flags=lanczos,`;
+
 export interface MotionConfig {
   name: string;
   label: string;
@@ -19,7 +24,7 @@ export const MOTIONS: Record<string, MotionConfig> = {
       const fps = 30;
       const frames = d * fps;
       const z = interpolate("on", frames, 1, 1.5, "easeOut"); // 缓出放大，减速到位，比匀速更有导演感
-      return `zoompan=z='${z}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${w}x${h}:fps=${fps}`;
+      return `${ss(w, h)}zoompan=z='${z}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${w}x${h}:fps=${fps}`;
     },
   },
   zoom_out_slow: {
@@ -30,7 +35,7 @@ export const MOTIONS: Record<string, MotionConfig> = {
       const fps = 30;
       const frames = d * fps;
       const z = interpolate("on", frames, 1.5, 1, "easeOut"); // 缓出缩小
-      return `zoompan=z='${z}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${w}x${h}:fps=${fps}`;
+      return `${ss(w, h)}zoompan=z='${z}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${w}x${h}:fps=${fps}`;
     },
   },
   pan_left: {
@@ -40,7 +45,7 @@ export const MOTIONS: Record<string, MotionConfig> = {
     getFilter: (w, h, d) => {
       const fps = 30;
       const frames = d * fps;
-      return `zoompan=z='1.3':x='iw/2-(iw/zoom/2)+on*(iw/zoom/${frames}*0.3)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${w}x${h}:fps=${fps}`;
+      return `${ss(w, h)}zoompan=z='1.3':x='iw/2-(iw/zoom/2)+on*(iw/zoom/${frames}*0.3)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${w}x${h}:fps=${fps}`;
     },
   },
   pan_right: {
@@ -50,7 +55,7 @@ export const MOTIONS: Record<string, MotionConfig> = {
     getFilter: (w, h, d) => {
       const fps = 30;
       const frames = d * fps;
-      return `zoompan=z='1.3':x='iw/2-(iw/zoom/2)-on*(iw/zoom/${frames}*0.3)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${w}x${h}:fps=${fps}`;
+      return `${ss(w, h)}zoompan=z='1.3':x='iw/2-(iw/zoom/2)-on*(iw/zoom/${frames}*0.3)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${w}x${h}:fps=${fps}`;
     },
   },
   ken_burns: {
@@ -61,7 +66,7 @@ export const MOTIONS: Record<string, MotionConfig> = {
       const fps = 30;
       const frames = d * fps;
       const z = interpolate("on", frames, 1, 1.3, "easeOut"); // 缓出放大 + 轻微平移
-      return `zoompan=z='${z}':x='iw/2-(iw/zoom/2)+on*0.5':y='ih/2-(ih/zoom/2)':d=${frames}:s=${w}x${h}:fps=${fps}`;
+      return `${ss(w, h)}zoompan=z='${z}':x='iw/2-(iw/zoom/2)+on*0.5':y='ih/2-(ih/zoom/2)':d=${frames}:s=${w}x${h}:fps=${fps}`;
     },
   },
   bounce: {
@@ -71,7 +76,7 @@ export const MOTIONS: Record<string, MotionConfig> = {
     getFilter: (w, h, d) => {
       const fps = 30;
       const frames = d * fps;
-      return `zoompan=z='if(lt(on,${Math.floor(frames * 0.3)}),1+on*0.02,if(lt(on,${Math.floor(frames * 0.5)}),1.6-(on-${Math.floor(frames * 0.3)})*0.01,1.4))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${w}x${h}:fps=${fps}`;
+      return `${ss(w, h)}zoompan=z='if(lt(on,${Math.floor(frames * 0.3)}),1+on*0.02,if(lt(on,${Math.floor(frames * 0.5)}),1.6-(on-${Math.floor(frames * 0.3)})*0.01,1.4))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${w}x${h}:fps=${fps}`;
     },
   },
   // 静止：不做运镜，仅按时长定格画面（输出格式与其它运镜一致，保证可与运镜片段拼接）
@@ -82,7 +87,7 @@ export const MOTIONS: Record<string, MotionConfig> = {
     getFilter: (w, h, d) => {
       const fps = 30;
       const frames = d * fps;
-      return `zoompan=z='1':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${w}x${h}:fps=${fps}`;
+      return `${ss(w, h)}zoompan=z='1':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${w}x${h}:fps=${fps}`;
     },
   },
 };

@@ -2,13 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { getDataDir } from "@backend/shared/paths";
 import { mkdir } from "fs/promises";
 import { join, basename } from "path";
-import { downloadStockFile } from "@backend/providers/stock-types";
 import {
+  downloadStockFile,
   STOCK_SOURCES,
   type StockCandidate,
   type StockSourceId,
   type StockMediaType,
   type StockOrientation,
+  persistedAssetTypeForStockSource,
 } from "@backend/providers/stock-types";
 import {
   searchStock,
@@ -19,6 +20,7 @@ import {
 import { broadenQuery } from "@backend/core/stock/stock-matcher";
 import { getDb } from "@backend/db";
 import { assets as assetsTable } from "@backend/db/schema";
+import { requireMerchant, requireOwnedProject } from "@backend/core/auth/require-merchant";
 
 /** 校验 projectId 防路径穿越（与 upload 路由一致） */
 const SAFE_ID = /^[a-zA-Z0-9\-]+$/;
@@ -125,11 +127,15 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ candidates, skippedSources });
   }
 
-  // 下载落库
+  // 下载落库：涉及具体项目，需要登录并校验项目归属
   const projectId = String(body.projectId ?? "");
   if (!projectId || !SAFE_ID.test(projectId)) {
     return NextResponse.json({ error: "download=true 时需提供合法 projectId" }, { status: 400 });
   }
+  const auth = await requireMerchant(req);
+  if ("error" in auth) return auth.error;
+  const owned = await requireOwnedProject(auth.merchant.id, projectId);
+  if ("error" in owned) return owned.error;
   // "永远有素材"兜底：原检索词无果时，用更宽泛的回退词重试，避免新手生僻主题导致某分镜空画面
   if (candidates.length === 0) {
     for (const bq of broadenQuery(query)) {
@@ -161,25 +167,29 @@ export async function POST(req: NextRequest) {
       const base = `${c.source}_${c.id}_${Date.now()}_${i}`;
       const { filePath, bytes } = await downloadStockFile(c.downloadUrl, stockDir, base);
       const publicUrl = `/api/files/${projectId}/stock/${basename(filePath)}`;
+      const isLocal = c.source === "local";
 
       const [row] = await db
         .insert(assetsTable)
         .values({
           projectId,
           shotId,
-          type: "stock_footage",
+          type: persistedAssetTypeForStockSource(c.source),
           filePath: publicUrl,
           thumbnailPath: c.previewImage ?? null,
           provider: c.source, // 记录实际来源（pexels/pixabay/openverse）
           prompt: query,
-          sourceUrl: c.pageUrl,
-          author: c.author,
-          license: c.license,
+          sourceUrl: isLocal ? null : c.pageUrl,
+          author: isLocal ? null : c.author,
+          license: isLocal ? null : c.license,
+          licenseUrl: isLocal ? null : c.licenseUrl ?? null,
+          attributionText: isLocal ? null : c.attributionText ?? null,
+          requiresAttribution: isLocal ? null : c.requiresAttribution ?? null,
           status: "done",
         })
         .returning();
 
-      saved.push({ ...row, bytes, mediaType: c.mediaType, downloadUrl: c.downloadUrl, attributionText: c.attributionText });
+      saved.push({ ...row, bytes, mediaType: c.mediaType, downloadUrl: c.downloadUrl });
     } catch (e) {
       console.error(`素材下载落库失败（${c.downloadUrl}）:`, e);
     }

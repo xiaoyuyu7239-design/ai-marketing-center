@@ -6,6 +6,11 @@ import { settings, type Shot } from "@backend/db/schema";
 
 export const STORE_MEMORY_KEY = "memory.store.v1";
 
+/** 按商家隔离的存储 key；每个商家有自己的一份店铺习惯记忆，不共享 */
+function storeMemoryKey(merchantId: string) {
+  return `${STORE_MEMORY_KEY}:${merchantId}`;
+}
+
 export interface StoreMemory {
   storeName: string;
   mainCategories: string[];
@@ -14,6 +19,8 @@ export interface StoreMemory {
   preferredStyles: string[];
   ctaPhrases: string[];
   bannedPhrases: string[];
+  /** 复盘沉淀的经验（来自已发布视频的真实数据），系统写入、滚动保留，生成时注入 */
+  reviewNotes: string[];
   likedExamples: Array<{
     productName: string;
     category: string;
@@ -50,6 +57,7 @@ export interface LearnFromScriptInput {
 
 const MAX_LIST = 10;
 const MAX_EXAMPLES = 8;
+const MAX_REVIEW_NOTES = 6;
 
 export function defaultStoreMemory(): StoreMemory {
   return {
@@ -60,6 +68,7 @@ export function defaultStoreMemory(): StoreMemory {
     preferredStyles: [],
     ctaPhrases: [],
     bannedPhrases: [],
+    reviewNotes: [],
     likedExamples: [],
     updatedAt: new Date(0).toISOString(),
   };
@@ -96,6 +105,7 @@ export function normalizeStoreMemory(raw: unknown): StoreMemory {
     preferredStyles: mergeUnique([], cleanList(value.preferredStyles)),
     ctaPhrases: mergeUnique([], cleanList(value.ctaPhrases, 80)),
     bannedPhrases: mergeUnique([], cleanList(value.bannedPhrases, 80)),
+    reviewNotes: mergeUnique([], cleanList(value.reviewNotes, 80), MAX_REVIEW_NOTES),
     likedExamples: Array.isArray(value.likedExamples)
       ? value.likedExamples
           .map((item) => ({
@@ -169,6 +179,20 @@ export function learnFromScript(memory: StoreMemory, input: LearnFromScriptInput
   };
 }
 
+/**
+ * 把单条视频复盘得出的"下条怎么改"沉淀进店铺记忆（数据飞轮的"总结→反哺"环）：
+ * 新经验排前、去重、滚动保留最近 MAX_REVIEW_NOTES 条，下次生成脚本时随记忆提示注入。
+ */
+export function learnFromReview(memory: StoreMemory, notes: string[]): StoreMemory {
+  const cleaned = cleanList(notes, 80);
+  if (!cleaned.length) return memory;
+  return {
+    ...memory,
+    reviewNotes: mergeUnique(cleaned, memory.reviewNotes, MAX_REVIEW_NOTES),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
 export function buildStoreMemoryHint(memory: StoreMemory, context: StoreMemoryContext = {}) {
   const lines: string[] = [];
   const sameCategoryExamples = memory.likedExamples
@@ -183,6 +207,8 @@ export function buildStoreMemoryHint(memory: StoreMemory, context: StoreMemoryCo
   if (memory.preferredStyles.length) lines.push(`- 用户喜欢的脚本风格：${memory.preferredStyles.join("、")}`);
   if (memory.ctaPhrases.length) lines.push(`- 常用结尾话术可参考：${memory.ctaPhrases.slice(0, 3).join(" / ")}`);
   if (memory.bannedPhrases.length) lines.push(`- 避免使用这些表达：${memory.bannedPhrases.join("、")}`);
+  if (memory.reviewNotes.length)
+    lines.push(`- 近期复盘得出的经验（来自已发布视频的真实数据，本次生成优先落实）：${memory.reviewNotes.slice(0, 3).join("；")}`);
   if (examples.length) {
     lines.push(
       `- 用户保存过的满意脚本：${examples
@@ -198,18 +224,19 @@ export function buildStoreMemoryHint(memory: StoreMemory, context: StoreMemoryCo
   return `【店铺习惯记忆（用户希望系统越用越懂自己的店，生成时请自然参考，不要在文案里解释这些记忆）】\n${contextLine}\n${lines.join("\n")}`;
 }
 
-export async function getStoreMemory(): Promise<StoreMemory> {
+export async function getStoreMemory(merchantId: string): Promise<StoreMemory> {
   const db = getDb();
-  const rows = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, STORE_MEMORY_KEY));
+  const rows = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, storeMemoryKey(merchantId)));
   return normalizeStoreMemory(rows[0]?.value);
 }
 
-export async function saveStoreMemory(memory: StoreMemory) {
+export async function saveStoreMemory(merchantId: string, memory: StoreMemory) {
   const db = getDb();
   const next = normalizeStoreMemory({ ...memory, updatedAt: new Date().toISOString() });
+  const key = storeMemoryKey(merchantId);
   await db
     .insert(settings)
-    .values({ key: STORE_MEMORY_KEY, value: next, updatedAt: new Date() })
+    .values({ key, value: next, updatedAt: new Date() })
     .onConflictDoUpdate({
       target: settings.key,
       set: { value: next, updatedAt: new Date() },

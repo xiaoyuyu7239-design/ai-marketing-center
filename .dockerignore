@@ -1,20 +1,40 @@
-# 构建上下文裁剪：node_modules/.next/data 等由构建阶段自行生成，且不能把宿主机的
-# mac-arm64 原生模块或开发数据(含真实项目)烤进镜像。
-node_modules
-.next
-data
-release
-.git
-.github
-*.log
-.DS_Store
-.env
-.env.*
-Dockerfile
-.dockerignore
-*.dmg
-*.exe
-electron/dist
-coverage
-.vscode
-.idea
+# 邀请内测 Web 镜像使用默认拒绝的构建上下文。这里的放行项必须与
+# config/release-source-paths.txt 和 Dockerfile 的本地 COPY 保持一致。
+**
+!Dockerfile
+!.dockerignore
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!next.config.ts
+!next-env.d.ts
+!tsconfig.json
+!postcss.config.mjs
+!tailwind.config.js
+!src/
+!src/**
+!前端/
+!前端/**
+!后端/
+!后端/**
+!服务器/
+!服务器/**
+!public/
+!public/**
+!drizzle/
+!drizzle/**
+!scripts/
+!scripts/**
+!tools/
+!tools/matting/
+!tools/matting/**
+
+# 即使出现在放行目录中，本机依赖、缓存、密钥和编辑器垃圾也不得进入上下文。
+**/node_modules
+**/.next
+**/.pnpm-store
+**/.env
+**/.env.*
+**/*.log
+**/*.tsbuildinfo
+**/.DS_Store

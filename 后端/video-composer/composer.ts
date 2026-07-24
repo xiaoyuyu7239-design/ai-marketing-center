@@ -1,9 +1,9 @@
 import { join, dirname } from "path";
 import { getDataDir } from "@backend/shared/paths";
 import { ffmpegBin, ffmpegHealthError } from "@backend/shared/ffmpeg-path";
-import { mkdir } from "fs/promises";
+import { mkdir, open, rename, stat, unlink } from "fs/promises";
 import { existsSync } from "fs";
-import { TRANSITIONS, type TransitionMode } from "./transitions";
+import type { TransitionMode } from "./transitions";
 import { MOTIONS, DEFAULT_MOTION } from "./motions";
 import { safeEncodeParams } from "@backend/core/media/compose-presets";
 import { createLimiter } from "@backend/shared/concurrency";
@@ -170,7 +170,9 @@ export function chunkCaption(
   if (n === 1) return [{ text: clean, startTime, endTime }];
   const cjk = /[぀-ヿ一-鿿가-힯]/.test(clean); // 假名/汉字/谚文
   const units = cjk ? Array.from(clean) : clean.split(/\s+/);
-  if (units.length <= n) return [{ text: clean, startTime, endTime }];
+  // 贴字式短句整句留屏不硬切——8 字文案被剁成"阔腿藏|肉不挑"式碎片毫无可读性（中文 12 字内、英文 6 词内视为短句）
+  const wholeLimit = cjk ? 12 : 6;
+  if (units.length <= Math.max(n, wholeLimit)) return [{ text: clean, startTime, endTime }];
   const per = Math.ceil(units.length / n);
   const chunks: string[] = [];
   for (let i = 0; i < units.length; i += per) chunks.push(units.slice(i, i + per).join(cjk ? "" : " "));
@@ -195,6 +197,8 @@ function escapeShellPath(filePath: string): string {
 // 视频合成配置
 export interface ComposeConfig {
   projectId: string;
+  /** 持久 composition 主键：用于确定性输出文件名与唯一 AIGC 内容制作编号。 */
+  compositionId: string;
   clips: ClipInput[];
   output: {
     resolution: "720p" | "1080p";
@@ -228,7 +232,7 @@ export interface ComposeConfig {
   /** 文字贴片：价格贴/卖点贴/标题贴，叠在画面上方区域（带货常见样式） */
   overlays?: {
     text: string;
-    style: "title" | "highlight" | "price";
+    style: "title" | "highlight" | "price" | "disclosure";
     startTime: number;
     endTime: number;
   }[];
@@ -264,6 +268,21 @@ const RESOLUTIONS: Record<string, Record<string, { width: number; height: number
 // 避免 FFmpeg「Error reinitializing filters」合成崩溃的关键。
 const SEGMENT_NORM = "format=yuv420p,setsar=1,fps=30,settb=AVTB";
 
+/**
+ * 比例不合的素材用"自身高斯模糊放大铺满"当背景（行业标准做法），替代黑边 pad——
+ * 3:4 商品图 / 2:3 生成视频放进 9:16 画布不再出现黑条。比例正好时前景盖满背景，无副作用。
+ */
+function blurFill(inputIndex: number, width: number, height: number): string {
+  const bg = `bf_bg${inputIndex}`;
+  const fg = `bf_fg${inputIndex}`;
+  return (
+    `split=2[${bg}][${fg}];` +
+    `[${bg}]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},gblur=sigma=24[${bg}b];` +
+    `[${fg}]scale=${width}:${height}:force_original_aspect_ratio=decrease[${fg}s];` +
+    `[${bg}b][${fg}s]overlay=(W-w)/2:(H-h)/2`
+  );
+}
+
 /** ffmpeg_fade 转场的交叉淡化时长（秒）。视频 xfade / 音频 acrossfade / 字幕时间轴必须用同一个值，否则音画字失步 */
 export const FADE_DURATION = 0.5;
 
@@ -273,9 +292,13 @@ export function buildComposeCommand(config: ComposeConfig): string {
   if (!config.clips || config.clips.length === 0) {
     throw new Error("没有可合成的片段（clips 为空）——请先为分镜配好画面素材再合成");
   }
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(config.compositionId)) {
+    throw new Error("compositionId 格式无效，无法生成安全的确定性输出路径");
+  }
   const { width, height } = RESOLUTIONS[config.output.aspectRatio][config.output.resolution];
   const outputDir = join(getDataDir(), "output", config.projectId);
-  const outputPath = join(outputDir, `final_${Date.now()}.mp4`);
+  // FFmpeg 先写同目录的 .part.mp4（保留 mp4 扩展便于 muxer 推断），成功 fsync 后再原子 rename。
+  const outputPath = join(outputDir, `final_${config.compositionId}.part.mp4`);
 
   const inputs: string[] = [];
   const filterParts: string[] = [];
@@ -298,13 +321,13 @@ export function buildComposeCommand(config: ComposeConfig): string {
       // （yuvj420p/yuv420p/yuvj444p…），不归一会让 concat/xfade 报「Error reinitializing filters」而合成失败。
       // zoompan 的 d=duration*fps 取整后会比 clip.duration 短 1~2 帧，多段图片累计后视频比音频/字幕短一截（漂移）。
       // 与视频段一致地用 tpad 克隆末帧补足、再 trim 到精确 duration，保证每段图片恒等于 clip.duration。
-      filterParts.push(`[${i}:v]scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,trim=end_frame=1,setpts=PTS-STARTPTS,${motion.getFilter(width, height, clip.duration)},tpad=stop_mode=clone:stop_duration=${clip.duration},trim=duration=${clip.duration},setpts=PTS-STARTPTS,${SEGMENT_NORM}[v${i}]`);
+      filterParts.push(`[${i}:v]${blurFill(i, width, height)},trim=end_frame=1,setpts=PTS-STARTPTS,${motion.getFilter(width, height, clip.duration)},tpad=stop_mode=clone:stop_duration=${clip.duration},trim=duration=${clip.duration},setpts=PTS-STARTPTS,${SEGMENT_NORM}[v${i}]`);
     } else {
       // 视频片段：缩放铺满 + 按分镜时长对齐。免费素材库（Wikimedia 等）真实视频长度不一，
       // 短于分镜时长的片段若只 trim 会留黑尾、并使音画/字幕错位——先 tpad 克隆末帧补到目标时长，
       // 再 trim 截断，保证视频段恒等于 clip.duration。
       inputs.push(`-i "${escapeShellPath(clip.filePath)}"`);
-      filterParts.push(`[${i}:v]scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,fps=30,tpad=stop_mode=clone:stop_duration=${clip.duration},trim=duration=${clip.duration},setpts=PTS-STARTPTS,${SEGMENT_NORM}[v${i}]`);
+      filterParts.push(`[${i}:v]${blurFill(i, width, height)},fps=30,tpad=stop_mode=clone:stop_duration=${clip.duration},trim=duration=${clip.duration},setpts=PTS-STARTPTS,${SEGMENT_NORM}[v${i}]`);
     }
   });
 
@@ -463,12 +486,14 @@ export function buildComposeCommand(config: ComposeConfig): string {
   if (config.overlays?.length) {
     const ovFont = config.subtitle?.fontFile ?? resolveChineseFontFile();
     // 各样式：字号、字色、底框色、纵向位置（画面上方）
-    const styleOf = (style: "title" | "highlight" | "price") => {
+    const styleOf = (style: "title" | "highlight" | "price" | "disclosure") => {
       if (style === "price")
-        return { size: Math.round(width * 0.075), color: "white", box: "red@0.85", y: "h*0.12" };
+        return { size: Math.round(width * 0.075), color: "white", box: "red@0.85", x: "(w-text_w)/2", y: "h*0.12" };
       if (style === "highlight")
-        return { size: Math.round(width * 0.058), color: "#1a1a1a", box: "yellow@0.9", y: "h*0.2" };
-      return { size: Math.round(width * 0.06), color: "white", box: "black@0.5", y: "h*0.06" }; // title
+        return { size: Math.round(width * 0.058), color: "#1a1a1a", box: "yellow@0.9", x: "(w-text_w)/2", y: "h*0.2" };
+      if (style === "disclosure")
+        return { size: Math.max(18, Math.round(width * 0.026)), color: "white", box: "black@0.42", x: "w*0.035", y: "h*0.035" };
+      return { size: Math.round(width * 0.06), color: "white", box: "black@0.5", x: "(w-text_w)/2", y: "h*0.06" }; // title
     };
     const drawOverlays = config.overlays
       .map((o) => {
@@ -481,7 +506,7 @@ export function buildComposeCommand(config: ComposeConfig): string {
           fontColor: s.color,
           borderW: 2,
           box: { color: s.box, borderW: bb },
-          x: "(w-text_w)/2",
+          x: s.x,
           y: s.y,
           enable: `enable='between(t,${o.startTime},${o.endTime})'`,
         });
@@ -530,6 +555,13 @@ export function buildComposeCommand(config: ComposeConfig): string {
     }
   }
 
+  // 结尾淡出：末尾 ~0.5s 淡到黑，避免最后一镜（尤其 1s 的 CTA / 背影镜）被硬切收尾很突兀
+  const TAIL_FADE = 0.5;
+  if (accumulated > TAIL_FADE * 2) {
+    filterParts.push(`[${currentVideoStream}]fade=t=out:st=${(accumulated - TAIL_FADE).toFixed(3)}:d=${TAIL_FADE}[v_tail]`);
+    currentVideoStream = "v_tail";
+  }
+
   // 响度归一到社媒标准（~-14 LUFS，EBU R128 / loudnorm）：跨视频音量一致，避免忽大忽小被抖音/TikTok 二次压制。
   // 置于音频链末端、单趟动态归一；无任何音频流则跳过。
   if (currentAudioStream) {
@@ -553,8 +585,11 @@ export function buildComposeCommand(config: ComposeConfig): string {
   const enc = safeEncodeParams(config.output.videoPreset, config.output.crf);
   cmd += ` -c:v libx264 -preset ${enc.videoPreset} -crf ${enc.crf} -profile:v high -level:v 4.2 -pix_fmt yuv420p`;
   // AIGC 隐式标识（GB 45438-2025）：把「生成合成标签+服务提供者+内容制作编号」写进文件元数据，与画面显式标识互补。
-  // 纯 -metadata，不影响 filter_complex；内容编号用 projectId 派生（确定性、可 ffprobe 断言）。
-  const aigcArgs = buildAigcMetadataArgs({ contentId: config.projectId });
+  // 纯 -metadata，不影响 filter_complex；同一 composition 重试保持相同唯一编号。
+  const aigcArgs = buildAigcMetadataArgs({
+    contentId: config.compositionId,
+    serviceProvider: process.env.HUIMAI_AIGC_SERVICE_PROVIDER,
+  });
   // 显式限定输出时长为视频真实时间轴(accumulated)：xfade 重叠后视频比朴素累计短，避免尾部音频盖在冻结帧上
   cmd += ` -c:a aac -b:a 256k -movflags +faststart ${aigcArgs} -t ${accumulated.toFixed(3)} "${escapeShellPath(outputPath)}"`;
 
@@ -564,10 +599,10 @@ export function buildComposeCommand(config: ComposeConfig): string {
 /** 合成的最长时长（毫秒）：超过即杀进程，避免某次渲染卡死无限占用机器 */
 export const COMPOSE_TIMEOUT_MS = 10 * 60 * 1000;
 
-/** 解析全局 FFmpeg 合成并发上限；默认 2，限制在 1-8 */
+/** 解析全局 FFmpeg 合成并发上限；持久 worker 默认严格并发 1，限制在 1-8 */
 export function resolveComposeMaxConcurrency(raw = process.env.COMPOSE_MAX_CONCURRENCY): number {
   const n = Number(raw);
-  if (!Number.isFinite(n)) return 2;
+  if (!Number.isFinite(n)) return 1;
   return Math.min(8, Math.max(1, Math.floor(n)));
 }
 
@@ -589,9 +624,19 @@ export async function composeVideo(config: ComposeConfig): Promise<string> {
   const outputDir = join(getDataDir(), "output", config.projectId);
   await mkdir(outputDir, { recursive: true });
 
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(config.compositionId)) {
+    throw new Error("compositionId 格式无效，无法生成安全的确定性输出路径");
+  }
+  const finalPath = join(outputDir, `final_${config.compositionId}.mp4`);
+  const partPath = join(outputDir, `final_${config.compositionId}.part.mp4`);
+  const existing = await stat(finalPath).catch(() => null);
+  // rename 成功后的 final 才可能存在；worker 在“文件完成但 DB 提交前”崩溃时可直接幂等复用。
+  if (existing?.isFile() && existing.size > 0) return finalPath;
+
   const ffmpegError = ffmpegHealthError();
   if (ffmpegError) throw new Error(ffmpegError);
 
+  await unlink(partPath).catch(() => undefined);
   const cmd = buildComposeCommand(config);
 
   const { exec } = await import("child_process");
@@ -601,13 +646,21 @@ export async function composeVideo(config: ComposeConfig): Promise<string> {
   try {
     // 只有昂贵的 FFmpeg 执行进入队列；排队时间不计入单次合成超时。
     await composeLimiter(() => execAsync(cmd, { maxBuffer: 50 * 1024 * 1024, timeout: COMPOSE_TIMEOUT_MS }));
+    const partInfo = await stat(partPath);
+    if (!partInfo.isFile() || partInfo.size <= 0) throw new Error("FFmpeg 未生成完整的临时成片文件");
+    const handle = await open(partPath, "r");
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename(partPath, finalPath);
   } catch (e) {
+    await unlink(partPath).catch(() => undefined);
     const friendly = composeErrorMessage(e as { code?: number | string; killed?: boolean; signal?: string; stderr?: string; message?: string });
     if (friendly) throw new Error(friendly);
     throw e;
   }
 
-  // 从命令中提取输出路径
-  const outputMatch = cmd.match(/"([^"]*final_[^"]*\.mp4)"/);
-  return outputMatch ? outputMatch[1] : "";
+  return finalPath;
 }

@@ -7,7 +7,7 @@
  * 说明：旧的 visual.volcengineapi.com Visual 服务需 AK/SK 签名，已弃用，统一改走方舟 Ark。
  */
 
-import { BaseProvider, ProviderError } from './base'
+import { BaseProvider, ProviderError, toSafeProviderErrorDto } from './base'
 import type {
   ProviderConfig,
   ImageOptions,
@@ -23,17 +23,26 @@ import type {
 // ==================== Ark API 响应类型 ====================
 
 /** 图像生成响应（OpenAI 兼容：data[].url） */
+interface ArkErrorPayload {
+  code?: string
+  message?: string
+  request_id?: string
+  requestId?: string
+}
+
 interface ArkImageResponse {
   model?: string
   data?: Array<{ url?: string; b64_json?: string; size?: string }>
   images?: string[] // 个别文档返回 images 数组，做兼容
-  error?: { code?: string; message?: string }
+  error?: ArkErrorPayload
+  request_id?: string
 }
 
 /** 视频任务创建响应 */
 interface ArkTaskCreateResponse {
   id: string
-  error?: { code?: string; message?: string }
+  error?: ArkErrorPayload
+  request_id?: string
 }
 
 /** 视频任务查询响应 */
@@ -42,7 +51,52 @@ interface ArkTaskQueryResponse {
   model?: string
   status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
   content?: { video_url?: string }
-  error?: { code?: string; message?: string }
+  error?: ArkErrorPayload
+  request_id?: string
+}
+
+function isArkFaceBlockCode(value: unknown): boolean {
+  return typeof value === 'string'
+    && /^(?:InputImageSensitiveContentDetected|ARK_FACE_BLOCKED|FACE_BLOCKED)$/i.test(value.trim())
+}
+
+function arkPayloadError(
+  label: string,
+  provider: string,
+  error?: ArkErrorPayload,
+  requestId?: string,
+): ProviderError {
+  const faceBlocked = isArkFaceBlockCode(error?.code)
+  return new ProviderError(
+    faceBlocked
+      ? '视频平台肖像保护拒绝了含清晰人脸的输入图'
+      : label,
+    faceBlocked ? 'ARK_FACE_BLOCKED' : (error?.code || 'ARK_API_ERROR'),
+    provider,
+    undefined,
+    {
+      ...(faceBlocked ? { category: 'safety' as const } : {}),
+      upstreamCode: error?.code,
+      requestId: error?.request_id || error?.requestId || requestId,
+    },
+  )
+}
+
+function translateArkFaceBlocked(error: unknown, provider: string): unknown {
+  if (!(error instanceof ProviderError)) return error
+  if (!isArkFaceBlockCode(error.code) && !isArkFaceBlockCode(error.upstreamCode)) return error
+  return new ProviderError(
+    '视频平台风控不允许含清晰真人人脸的图片转视频（肖像保护）。请改用背影、侧影、颈部以下等无脸构图，或使用静态运镜。',
+    'ARK_FACE_BLOCKED',
+    provider,
+    error.statusCode,
+    {
+      category: 'safety',
+      retryable: false,
+      requestId: error.requestId,
+      upstreamCode: error.upstreamCode || error.code,
+    },
+  )
 }
 
 /** 把宽高映射为 Ark 视频 ratio */
@@ -55,13 +109,20 @@ function toRatio(width?: number, height?: number): string {
   return 'adaptive'
 }
 
-/** 把宽高映射为 Ark 图像 size；超出 Ark 像素范围则回退 "2K"（由模型按 prompt 决定比例） */
+/** 把宽高映射为 Ark 图像 size；低于最小像素数时按原比例放大，不得回退丢失比例的 "2K"。 */
 function toImageSize(width?: number, height?: number): string {
   const w = width ?? 0
   const h = height ?? 0
   const total = w * h
   // Ark 总像素范围 [2560x1440=3686400, 4096x4096=16777216]
   if (total >= 3686400 && total <= 16777216) return `${w}x${h}`
+  if (w > 0 && h > 0 && total < 3686400) {
+    const scale = Math.sqrt(3686400 / total)
+    // Ark 尺寸使用 8 的倍数更稳定；1080x1920 会得到精确 9:16 的 1440x2560。
+    const scaledWidth = Math.min(4096, Math.ceil((w * scale) / 8) * 8)
+    const scaledHeight = Math.min(4096, Math.ceil((h * scale) / 8) * 8)
+    return `${scaledWidth}x${scaledHeight}`
+  }
   return '2K'
 }
 
@@ -102,11 +163,7 @@ export class VolcEngineProvider extends BaseProvider {
     })
 
     if (resp.error) {
-      throw new ProviderError(
-        `火山方舟图像生成失败: ${resp.error.message ?? resp.error.code}`,
-        resp.error.code ?? 'ARK_IMAGE_ERROR',
-        this.name
-      )
+      throw arkPayloadError('火山方舟图像生成失败', this.name, resp.error, resp.request_id)
     }
 
     // 优先 data[].url，兼容 images[] 字符串数组
@@ -134,9 +191,14 @@ export class VolcEngineProvider extends BaseProvider {
       text = `${options.prompt}。旁白：「${options.voiceover}」`
     }
 
-    // content：文本 + 可选首帧图（image_url）
+    // content：文本 + 可选首帧图（image_url）。
+    // 首尾帧模式（flf2v）：同时给首帧+尾帧时必须显式标 role，模型生成"从 A 自然运动到 B"的过程——
+    // 相邻分镜互为首尾帧可以让镜头之间咬合流动，是参考级成片的关键手法。
     const content: Array<Record<string, unknown>> = [{ type: 'text', text }]
-    if (options.firstFrameUrl) {
+    if (options.firstFrameUrl && options.lastFrameUrl) {
+      content.push({ type: 'image_url', image_url: { url: options.firstFrameUrl }, role: 'first_frame' })
+      content.push({ type: 'image_url', image_url: { url: options.lastFrameUrl }, role: 'last_frame' })
+    } else if (options.firstFrameUrl) {
       content.push({ type: 'image_url', image_url: { url: options.firstFrameUrl } })
     }
 
@@ -151,19 +213,31 @@ export class VolcEngineProvider extends BaseProvider {
       ...options.extra,
     }
 
-    const created = await this.request<ArkTaskCreateResponse>(
-      '/contents/generations/tasks',
-      { method: 'POST', body }
-    )
+    let created: ArkTaskCreateResponse
+    try {
+      created = await this.request<ArkTaskCreateResponse>(
+        '/contents/generations/tasks',
+        { method: 'POST', body }
+      )
+    } catch (e) {
+      // 火山方舟对含清晰真人人脸的输入图直接拒绝图生视频（肖像保护风控），把平台报错翻译成可行动的提示
+      throw translateArkFaceBlocked(e, this.name)
+    }
     if (created.error || !created.id) {
-      throw new ProviderError(
-        `火山方舟视频任务创建失败: ${created.error?.message ?? '未返回任务 ID'}`,
-        created.error?.code ?? 'ARK_TASK_ERROR',
-        this.name
+      throw arkPayloadError(
+        created.id ? '火山方舟视频任务创建失败' : '火山方舟视频任务未返回任务 ID',
+        this.name,
+        created.error,
+        created.request_id,
       )
     }
 
-    const finalStatus = await this.pollTaskStatus(created.id, { interval: 5000 })
+    let finalStatus: TaskStatus
+    try {
+      finalStatus = await this.pollTaskStatus(created.id, { interval: 5000 })
+    } catch (error) {
+      throw translateArkFaceBlocked(error, this.name)
+    }
     if (!finalStatus.result) {
       throw new ProviderError('任务完成但未返回结果', 'NO_RESULT', this.name)
     }
@@ -192,8 +266,10 @@ export class VolcEngineProvider extends BaseProvider {
       }
     }
     if (status === 'failed') {
-      taskStatus.error = data.error?.message
-      taskStatus.errorCode = data.error?.code
+      const failure = arkPayloadError('火山方舟视频任务生成失败', this.name, data.error, data.request_id)
+      const safe = toSafeProviderErrorDto(failure)
+      taskStatus.error = safe.message
+      taskStatus.errorCode = safe.code
     }
     return taskStatus
   }

@@ -1,6 +1,6 @@
 # 把 AI Marketing Center 打成自托管 Docker 镜像，冒烟测试通过后发布到 GitHub Container Registry (ghcr.io)。
 # 触发：发布 Release 时自动出 vX.Y.Z + latest；也可在 Actions 页手动 workflow_dispatch。
-# 发布后镜像出现在仓库 Packages 页：ghcr.io/xiaoyuyu7239-design/ai-marketing-center
+# 镜像名由 github.repository 唯一决定；本仓库当前为 ghcr.io/xixihhhh/clipforge。
 name: Publish Docker image (ghcr.io)
 
 on:
@@ -11,6 +11,8 @@ on:
 permissions:
   contents: read
   packages: write # 推镜像到 ghcr 需要
+  id-token: write # actions/attest 签发 OIDC 身份需要
+  attestations: write # 写入 GitHub artifact attestation 需要
 
 concurrency:
   group: docker-${{ github.ref }}
@@ -18,42 +20,192 @@ concurrency:
 
 jobs:
   docker:
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+      HUIMAI_CODE_VERSION: ${{ github.sha }}
+      IMAGE_NAME: ghcr.io/${{ github.repository }}
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: 配置 Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: 校验发布身份
+        env:
+          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = "release" ]; then
+            node scripts/verify-release-identity.mjs \
+              --tag "$GITHUB_REF_NAME" \
+              --release-prerelease "$RELEASE_PRERELEASE"
+          else
+            [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ "$GITHUB_REF" = "refs/heads/main" ] || {
+              echo "::error::手动发布只允许 refs/heads/main"
+              exit 1
+            }
+          fi
+          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main || {
+            echo "::error::发布提交不属于 origin/main，拒绝发布"
+            exit 1
+          }
+
+      - name: 锁定依赖并执行发布门禁
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm lint
+          pnpm exec tsc --noEmit --incremental false
+          pnpm test
+          node scripts/stage-release-candidate.mjs --require-git-tracked
 
       - name: 配置 Buildx
         uses: docker/setup-buildx-action@v3
 
-      # 1) 先构建并 load 到本机 docker，用于推送前的冒烟测试
+      - name: 生成候选镜像标签
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: |
+            latest=false
+          tags: |
+            type=raw,value=latest,enable=${{ github.event_name == 'release' && !github.event.release.prerelease && !github.event.release.draft }}
+            type=semver,pattern={{version}},enable=${{ github.event_name == 'release' }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ github.event_name == 'release' && !github.event.release.prerelease && !github.event.release.draft }}
+            type=sha,format=short
+            type=raw,value=sha-${{ github.sha }}
+
+      # 依赖、lint和测试全部结束后，紧贴 Docker context 快照生成证据；
+      # 这样门禁过程中新增的任何放行目录文件也会被清单化或拒绝。
+      - name: 生成发布源码边界证据
+        run: |
+          set -euo pipefail
+          if ! git diff --quiet --ignore-submodules -- || ! git diff --cached --quiet --ignore-submodules --; then
+            echo "::error::发布门禁修改了受版本控制文件，拒绝构建"
+            git status --short --untracked-files=no
+            exit 1
+          fi
+          node scripts/verify-release-source.mjs \
+            --require-git-tracked \
+            --evidence release-source-evidence.json
+
+      # 1) 只构建一次并 load 到本机；后续推送的所有标签都指向这一个已冒烟 image ID。
       - name: 构建镜像（load 本地待测）
         uses: docker/build-push-action@v6
         with:
           context: .
+          platforms: linux/amd64
           load: true
           tags: ai-marketing-center:smoke
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            HUIMAI_CODE_VERSION=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # 2) 冒烟测试：起容器，确认能启动 + DB 迁移成功 + 落地页 200 + ffmpeg 可用
-      - name: 冒烟测试（启动 / 页面可达 / ffmpeg）
+      # 2) 冒烟测试：生产 SaaS 现在是 fail-closed，CI 也必须显式给出邀请/法律/后台配置。
+      # 以下值只用于一次性空数据容器，不是生产 secret。
+      - name: 冒烟测试（启动 / 迁移 / readiness / 页面 / ffmpeg）
         run: |
-          docker run -d -p 3000:3000 --name smoke ai-marketing-center:smoke
+          set -euo pipefail
+          trap 'docker rm -f smoke >/dev/null 2>&1 || true' EXIT
+          docker run -d -p 3000:3000 --name smoke \
+            -e TZ=Asia/Shanghai \
+            -e HUIMAI_CODE_VERSION="$GITHUB_SHA" \
+            -e HUIMAI_DEPLOYMENT_MODE=saas \
+            -e HUIMAI_PUBLIC_BASE_URL=https://smoke.huimai.test \
+            -e HUIMAI_INVITE_ONLY=1 \
+            -e HUIMAI_PUBLIC_SIGNUP=0 \
+            -e HUIMAI_INVITE_EMAILS=smoke@huimai.test \
+            -e HUIMAI_LEGAL_ENTITY=Huimai-CI \
+            -e HUIMAI_LEGAL_CONTACT=ci@huimai.test \
+            -e HUIMAI_DATA_RETENTION_DAYS=30 \
+            -e HUIMAI_AI_PROVIDER_DISCLOSURE=CI-no-external-provider-call \
+            -e HUIMAI_AIGC_SERVICE_PROVIDER=Huimai-CI \
+            -e HUIMAI_MERCHANT_UPLOAD_MAX_BYTES=2147483648 \
+            -e CLIPFORGE_ADMIN_PASSWORD=CI-smoke-admin-password-2026 \
+            -e CLIPFORGE_ADMIN_SESSION_SECRET=CI-smoke-session-secret-2026-not-for-production \
+            -e CLIPFORGE_DISABLE_SCHEDULER=1 \
+            -e APP_MIGRATIONS_DIR=/app/drizzle \
+            -e BACKUP_DIR=/backups \
+            ai-marketing-center:smoke
           for i in $(seq 1 40); do
-            code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/start || true)
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/api/health/ready || true)
             [ "$code" = "200" ] && break
             sleep 2
           done
-          echo "--- 容器日志 ---"; docker logs smoke 2>&1 | tail -30
-          final=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/start || true)
-          echo "final /start = $final"
-          [ "$final" = "200" ] || { echo "::error::冒烟测试失败：/start 未返回 200"; exit 1; }
-          docker exec smoke ffmpeg -version | head -1
-          docker rm -f smoke
+          echo "--- 容器日志 ---"
+          docker logs smoke 2>&1 | tail -30
+          live=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/api/health/live || true)
+          ready=$(curl -sS -D ready-headers.txt -o ready-body.json -w "%{http_code}" http://localhost:3000/api/health/ready || true)
+          start=$(curl -sS -o start.html -w "%{http_code}" http://localhost:3000/start || true)
+          echo "final live=$live ready=$ready /start=$start"
+          [ "$live" = "200" ] || { echo "::error::liveness 未通过"; exit 1; }
+          [ "$ready" = "200" ] || { echo "::error::readiness 未通过"; exit 1; }
+          [ "$start" = "200" ] || { echo "::error::/start 未返回 200"; exit 1; }
+          jq -e '.status == "ready"' ready-body.json >/dev/null
+          grep -Eiq '^cache-control:.*no-store' ready-headers.txt || {
+            echo "::error::readiness 未声明 no-store"
+            exit 1
+          }
+          ready_code_version=$(awk -F': ' 'tolower($1) == "x-huimai-code-version" { gsub("\r", "", $2); print $2 }' ready-headers.txt)
+          [ "$ready_code_version" = "$GITHUB_SHA" ] || {
+            echo "::error::readiness BUILD_ID 与工作流 commit 不一致"
+            exit 1
+          }
+          registration=$(curl -sS http://localhost:3000/api/auth/registration-status)
+          jq -e '.inviteOnly == true and .registrationAvailable == true' <<< "$registration" >/dev/null
+          static_path=$(node -e "const h=require('fs').readFileSync('start.html','utf8'); const m=h.match(/\/_next\/static\/[^\"']+\.(?:css|js)/); if(!m)process.exit(1); process.stdout.write(m[0])")
+          static_status=$(curl -sS -o /dev/null -w "%{http_code}" "http://localhost:3000${static_path}")
+          [ "$static_status" = "200" ] || { echo "::error::Next 静态资源未返回 200"; exit 1; }
+          logo_status=$(curl -sS -o /dev/null -w "%{http_code}" http://localhost:3000/logo.svg)
+          font_status=$(curl -sS -o /dev/null -w "%{http_code}" http://localhost:3000/fonts/subtitle.otf)
+          [ "$logo_status" = "200" ] && [ "$font_status" = "200" ] || {
+            echo "::error::public Logo 或中文字体缺失"
+            exit 1
+          }
+          docker exec smoke ffmpeg -version >/dev/null
+          docker exec smoke sh -c '
+            test -f .next/BUILD_ID &&
+            test "$(cat .next/BUILD_ID)" = "$HUIMAI_CODE_VERSION" &&
+            test -f drizzle/0025_motion_asset_assessments.sql &&
+            test -f drizzle/0026_motion_job_schema_upgrade.sql &&
+            test -f scripts/backup-data.mjs &&
+            test -f scripts/restore-data.mjs &&
+            test -f scripts/verify-backup.mjs &&
+            test -f scripts/preflight-beta.mjs &&
+            test -f scripts/verify-edge-body-limit.mjs &&
+            test -f tools/matting/matte.mjs &&
+            test -f tools/matting/face-detect.mjs &&
+            test -f tools/matting/models/version-RFB-320.onnx &&
+            test -d tools/matting/node_modules/sharp &&
+            test -d tools/matting/node_modules/onnxruntime-node &&
+            test ! -e tools/matting/node_modules/onnxruntime-node/bin/napi-v3/linux/x64/libonnxruntime_providers_cuda.so &&
+            test ! -e tools/matting/node_modules/onnxruntime-node/bin/napi-v3/linux/x64/libonnxruntime_providers_tensorrt.so &&
+            test "$(sha256sum tools/matting/models/version-RFB-320.onnx | awk '\''{print $1}'\'')" = "34cd7e60aeff28744c657de7a3dc64e872d506741de66987f3426f2b79f88017"
+          '
+          docker exec smoke node -e '
+            const Database = require("better-sqlite3");
+            const db = new Database("/data/sqlite.db", { readonly: true });
+            const integrity = db.pragma("integrity_check", { simple: true });
+            const migrations = db.prepare("SELECT count(*) AS count FROM __drizzle_migrations").get().count;
+            if (integrity !== "ok" || migrations !== 27) process.exit(1);
+          '
+          docker image inspect ai-marketing-center:smoke --format 'tested image id={{.Id}}'
 
-      # 3) 测试通过 → 登录 + 打标签 + 推送（构建缓存复用，秒级）
+      # 3) 测试通过 → 登录、给同一 image ID 晋级正式标签并推送；绝不二次构建。
       - name: 登录 ghcr.io
         uses: docker/login-action@v3
         with:
@@ -61,24 +213,168 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 生成镜像标签
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=raw,value=latest
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha,format=short
+      - name: 推送、远程反查并生成发布证据
+        id: publish
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
 
-      - name: 构建并推送（linux/amd64）
-        uses: docker/build-push-action@v6
+          tested_id=$(docker image inspect ai-marketing-center:smoke --format '{{.Id}}')
+          immutable_ref="${IMAGE_NAME}:sha-${GITHUB_SHA}"
+          printf '%s\n' "$IMAGE_TAGS" | grep -Fqx "$immutable_ref" || {
+            echo "::error::候选标签缺少完整提交不可变标签 $immutable_ref"
+            exit 1
+          }
+
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            docker tag ai-marketing-center:smoke "$tag"
+            candidate_id=$(docker image inspect "$tag" --format '{{.Id}}')
+            [ "$candidate_id" = "$tested_id" ] || { echo "::error::待推镜像与已测镜像不是同一 image ID"; exit 1; }
+            docker push "$tag"
+          done <<< "$IMAGE_TAGS"
+
+          # 只信任 GHCR 对不可变标签返回的权威 descriptor digest，再按 digest 反查 manifest。
+          for attempt in $(seq 1 5); do
+            if registry_digest=$(docker buildx imagetools inspect "$immutable_ref" \
+              --format '{{json .Manifest.Digest}}' | jq -er \
+              '. | select(type == "string" and startswith("sha256:") and length == 71)'); then
+              break
+            fi
+            [ "$attempt" -lt 5 ] || { echo "::error::无法从 GHCR 读回已推送 manifest digest"; exit 1; }
+            sleep $((attempt * 2))
+          done
+          digest_ref="${IMAGE_NAME}@${registry_digest}"
+          docker buildx imagetools inspect --raw "$digest_ref" > registry-manifest.json
+          [ -s registry-manifest.json ] || { echo "::error::GHCR 返回了空 manifest"; exit 1; }
+
+          remote_config=$(jq -er '.config.digest | select(type == "string" and startswith("sha256:"))' registry-manifest.json)
+          [ "$remote_config" = "$tested_id" ] || {
+            echo "::error::GHCR 远程 config.digest=$remote_config 与已冒烟 image ID=$tested_id 不一致"
+            exit 1
+          }
+          read -r manifest_file_sha _ < <(sha256sum registry-manifest.json)
+          [ "sha256:${manifest_file_sha}" = "$registry_digest" ] || {
+            echo "::error::GHCR raw manifest SHA-256 与权威 descriptor digest 不一致"
+            exit 1
+          }
+
+          if ! git diff --quiet --ignore-submodules -- || ! git diff --cached --quiet --ignore-submodules --; then
+            echo "::error::检出后的受版本控制文件已变更，拒绝将当前工作区冒充提交证据"
+            git status --short --untracked-files=no
+            exit 1
+          fi
+          checked_out_commit=$(git rev-parse HEAD)
+          [ "$checked_out_commit" = "$GITHUB_SHA" ] || {
+            echo "::error::检出提交 $checked_out_commit 与工作流提交 $GITHUB_SHA 不一致"
+            exit 1
+          }
+          source_tree=$(git rev-parse 'HEAD^{tree}')
+          read -r dockerfile_sha _ < <(sha256sum Dockerfile)
+          read -r dockerignore_sha _ < <(sha256sum .dockerignore)
+          read -r package_sha _ < <(sha256sum package.json)
+          read -r lockfile_sha _ < <(sha256sum pnpm-lock.yaml)
+          read -r workflow_sha _ < <(sha256sum .github/workflows/docker-publish.yml)
+          read -r source_allowlist_sha _ < <(sha256sum config/release-source-paths.txt)
+          read -r source_verifier_sha _ < <(sha256sum scripts/verify-release-source.mjs)
+          read -r source_evidence_sha _ < <(sha256sum release-source-evidence.json)
+          source_digest=$(jq -er '.sourceDigestSha256 | select(type == "string" and test("^[0-9a-f]{64}$"))' release-source-evidence.json)
+          jq -e '.gitTrackedOnly == true' release-source-evidence.json >/dev/null || {
+            echo "::error::发布源码证据未声明全部文件属于当前 commit"
+            exit 1
+          }
+          evidence_allowlist_sha=$(jq -er '.allowlistSha256 | select(type == "string" and test("^[0-9a-f]{64}$"))' release-source-evidence.json)
+          [ "$evidence_allowlist_sha" = "$source_allowlist_sha" ] || {
+            echo "::error::发布源码证据中的 allowlist SHA-256 与当前白名单不一致"
+            exit 1
+          }
+          published_tags=$(printf '%s\n' "$IMAGE_TAGS" | jq -Rsc 'split("\n") | map(select(length > 0))')
+          verified_at=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          workflow_url="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+          jq -n \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg commit "$checked_out_commit" \
+            --arg tree "$source_tree" \
+            --arg sourceRef "$GITHUB_REF" \
+            --arg dockerfileSha "$dockerfile_sha" \
+            --arg dockerignoreSha "$dockerignore_sha" \
+            --arg packageSha "$package_sha" \
+            --arg lockfileSha "$lockfile_sha" \
+            --arg workflowSha "$workflow_sha" \
+            --arg sourceAllowlistSha "$source_allowlist_sha" \
+            --arg sourceVerifierSha "$source_verifier_sha" \
+            --arg sourceEvidenceSha "$source_evidence_sha" \
+            --arg sourceDigest "$source_digest" \
+            --arg testedImageId "$tested_id" \
+            --arg registryReference "$immutable_ref" \
+            --arg registryDigestReference "$digest_ref" \
+            --arg registryManifestDigest "$registry_digest" \
+            --arg registryManifestFileSha "$manifest_file_sha" \
+            --arg registryConfigDigest "$remote_config" \
+            --arg workflowUrl "$workflow_url" \
+            --arg workflowRunId "$GITHUB_RUN_ID" \
+            --arg workflowRunAttempt "$GITHUB_RUN_ATTEMPT" \
+            --arg verifiedAt "$verified_at" \
+            --argjson publishedTags "$published_tags" \
+            '{
+              schemaVersion: 1,
+              repository: $repository,
+              commit: $commit,
+              tree: $tree,
+              sourceRef: $sourceRef,
+              criticalFileSha256: {
+                "Dockerfile": $dockerfileSha,
+                ".dockerignore": $dockerignoreSha,
+                "package.json": $packageSha,
+                "pnpm-lock.yaml": $lockfileSha,
+                ".github/workflows/docker-publish.yml": $workflowSha,
+                "config/release-source-paths.txt": $sourceAllowlistSha,
+                "scripts/verify-release-source.mjs": $sourceVerifierSha
+              },
+              releaseSourceEvidenceSha256: $sourceEvidenceSha,
+              releaseSourceDigestSha256: $sourceDigest,
+              testedPlatform: "linux/amd64",
+              testedImageId: $testedImageId,
+              registryReference: $registryReference,
+              registryDigestReference: $registryDigestReference,
+              registryManifestDigest: $registryManifestDigest,
+              registryManifestFileSha256: $registryManifestFileSha,
+              registryConfigDigest: $registryConfigDigest,
+              publishedTags: $publishedTags,
+              workflowUrl: $workflowUrl,
+              workflowRunId: $workflowRunId,
+              workflowRunAttempt: $workflowRunAttempt,
+              verifiedAt: $verifiedAt
+            }' > release-evidence.json
+          jq -e . release-evidence.json >/dev/null
+
+          echo "registry-manifest-digest=$registry_digest" >> "$GITHUB_OUTPUT"
+          echo "tested-image-id=$tested_id" >> "$GITHUB_OUTPUT"
+          echo "immutable-reference=$immutable_ref" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Docker 发布证据"
+            echo "- 完整提交标签: \`$immutable_ref\`"
+            echo "- 已测 image ID / 远程 config digest: \`$tested_id\`"
+            echo "- 远程 manifest digest: \`$registry_digest\`"
+            echo "- 可部署 digest 引用: \`$digest_ref\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 上传发布证据
+        uses: actions/upload-artifact@v4
         with:
-          context: .
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          name: docker-release-evidence-${{ github.sha }}
+          path: |
+            release-evidence.json
+            release-source-evidence.json
+            registry-manifest.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: 为已核验镜像签发来源证明
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.publish.outputs.registry-manifest-digest }}
+          push-to-registry: true

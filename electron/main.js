@@ -87,6 +87,9 @@ async function startServer() {
       HOSTNAME: "127.0.0.1",
       APP_DATA_DIR: dataDir,
       APP_MIGRATIONS_DIR: migrationsDir(serverDir),
+      HUIMAI_DEPLOYMENT_MODE: "desktop",
+      // 桌面版是本机单人使用：跳过商家登录，自动使用本机默认商家（多租户 SaaS 部署不可开启）
+      CLIPFORGE_SINGLE_USER: "1",
       ...(ffmpegPath ? { FFMPEG_PATH: ffmpegPath } : {}),
       ...(ffprobePath ? { FFPROBE_PATH: ffprobePath } : {}),
     },

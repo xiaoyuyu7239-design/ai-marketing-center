@@ -1,7 +1,7 @@
 # 视频预览
 
-**路由**: `/project/[id]/video`  
-**文件**: `src/app/project/[id]/video/page.tsx` → `前端/视频预览/page.tsx`  
+**路由**: `/project/[id]/video`
+**文件**: `src/app/project/[id]/video/page.tsx` → `前端/视频预览/page.tsx`
 **行数**: 831 行
 
 ## 功能
@@ -18,4 +18,3 @@
 ## 添加新功能
 - 新配置开关：在 config 对象 + UI toggle 中添加
 - 新转场效果：在 `后端/video-composer/transitions.ts` 中添加
-

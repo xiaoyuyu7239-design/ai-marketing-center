@@ -22,6 +22,8 @@ import { getExampleProducts } from "@backend/shared/examples";
 import { useT, useLocale } from "@frontend/i18n";
 import { LanguageToggle } from "@frontend/components/language-toggle";
 import { BrandWheatMark } from "@frontend/components/brand-wheat-logo";
+import { pollComposition } from "@backend/shared/poll-composition";
+import { acquireComposeOperation, clearComposeOperation } from "@frontend/lib/compose-operation";
 
 // 视频模式选项（labelKey 指向 batch 命名空间词条，渲染时取译文）
 const videoModeOptions = [
@@ -189,6 +191,7 @@ export default function BatchPage() {
             videoMode,
           }),
         });
+        if (projRes.status === 401) throw new Error("请先到创作工作台登录商家账号，再回来批量生成");
         if (!projRes.ok) throw new Error(t("errorProjectCreate"));
         const project = await projRes.json();
 
@@ -220,22 +223,31 @@ export default function BatchPage() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ source: "all", mediaType: "auto" }),
           }).catch(() => {}); // 配画面失败不阻断（可能已有商品图/素材）
+          const composePayload = { freeTts: { enabled: true }, ...(productCard && { productCard: true }) };
+          const composeOperation = acquireComposeOperation(project.id, "batch-auto-compose", composePayload);
           const composeRes = await fetch(`/api/project/${project.id}/compose`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ freeTts: { enabled: true }, ...(productCard && { productCard: true }) }),
+            headers: {
+              "Content-Type": "application/json",
+              "Idempotency-Key": composeOperation.idempotencyKey,
+            },
+            body: JSON.stringify(composePayload),
           });
-          if (!composeRes.ok) throw new Error(t("errorComposeFailed"));
-          // 合成是异步的：轮询 composition 状态直到 done/failed（最多 ~3.75 分钟）
-          let composed = false;
-          for (let i = 0; i < 90 && !abortRef.current; i++) {
-            await new Promise((r) => setTimeout(r, 2500));
-            const c = await fetch(`/api/project/${project.id}/compose`).then((x) => x.json()).catch(() => ({}));
-            const st = c?.composition?.status;
-            if (st === "done") { composed = true; break; }
-            if (st === "failed") throw new Error(t("errorComposeFailed"));
+          const composeData = await composeRes.json().catch(() => ({}));
+          if (!composeRes.ok) {
+            clearComposeOperation(composeOperation);
+            throw new Error(composeData.error || t("errorComposeFailed"));
           }
-          if (!composed && !abortRef.current) throw new Error(t("errorComposeFailed"));
+          const compositionId = typeof composeData.compositionId === "string" ? composeData.compositionId : "";
+          if (!compositionId) throw new Error(t("errorComposeFailed"));
+          await pollComposition(project.id, compositionId, {
+            timeoutMs: 15 * 60 * 1000,
+            failMessage: t("errorComposeFailed"),
+            onStatus: (status) => {
+              if (status === "done" || status === "failed") clearComposeOperation(composeOperation);
+            },
+          });
+          clearComposeOperation(composeOperation);
         }
 
         incrementVideoCount(product.id);
@@ -247,8 +259,8 @@ export default function BatchPage() {
       }
     };
 
-    // 并发池：最多 3 个同时跑，加速批量出片
-    const CONCURRENCY = 3;
+    // 与服务端“每商户最多 2 个未完成任务”一致，避免第 3 条被队列限额立即拒绝。
+    const CONCURRENCY = 2;
     let cursor = 0;
     const worker = async () => {
       while (!abortRef.current) {

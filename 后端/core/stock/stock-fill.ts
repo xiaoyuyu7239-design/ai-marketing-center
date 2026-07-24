@@ -1,11 +1,17 @@
 /**
- * 按分镜自动配素材 —— 用分镜的英文检索词从免费素材库取一条画面，下载落库为 stock_footage。
+ * 按分镜自动配素材 —— 用分镜的英文检索词取一条画面；第三方来源落库为 stock_footage，
+ * 项目本地自有 B-roll 保持 user_upload 语义。
  * 复用多源素材引擎 + broadenQuery「永远有素材」兜底，是「脚本→素材自动配齐」的核心。
  */
 import { mkdir } from "fs/promises";
 import { join, basename } from "path";
 import { getUploadsDir } from "@backend/shared/paths";
-import { downloadStockFile, orientationOf, type StockSourceId } from "@backend/providers/stock-types";
+import {
+  downloadStockFile,
+  orientationOf,
+  persistedAssetTypeForStockSource,
+  type StockSourceId,
+} from "@backend/providers/stock-types";
 import { searchStock, searchAllStock, type StockSearchOptions } from "@backend/providers/stock-registry";
 import { broadenQuery, pickBestCandidate } from "@backend/core/stock/stock-matcher";
 import { getDb } from "@backend/db";
@@ -56,23 +62,28 @@ export async function fillShotStock(input: FillShotInput): Promise<Record<string
   const base = `${c.source}_${c.id}_${Date.now()}_${shotId}`;
   const { filePath } = await downloadStockFile(c.downloadUrl, stockDir, base, c.mediaType);
   const publicUrl = `/api/files/${projectId}/stock/${basename(filePath)}`;
+  const isLocal = c.source === "local";
 
   const [row] = await getDb()
     .insert(assetsTable)
     .values({
       projectId,
       shotId,
-      type: "stock_footage",
+      type: persistedAssetTypeForStockSource(c.source),
       filePath: publicUrl,
       thumbnailPath: c.previewImage ?? null,
       provider: c.source,
       prompt: query,
-      sourceUrl: c.pageUrl,
-      author: c.author,
-      license: c.license,
+      // local 是商家上传到本项目的自有素材；第三方许可字段必须留空，权利声明由上传协议承接。
+      sourceUrl: isLocal ? null : c.pageUrl,
+      author: isLocal ? null : c.author,
+      license: isLocal ? null : c.license,
+      licenseUrl: isLocal ? null : c.licenseUrl ?? null,
+      attributionText: isLocal ? null : c.attributionText ?? null,
+      requiresAttribution: isLocal ? null : c.requiresAttribution ?? null,
       status: "done",
     })
     .returning();
 
-  return { ...row, mediaType: c.mediaType, attributionText: c.attributionText };
+  return { ...row, mediaType: c.mediaType };
 }

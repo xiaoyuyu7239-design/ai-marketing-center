@@ -3,7 +3,6 @@
  * 包含经典爆款脚本结构，适用于清洁用品、收纳、厨房用具、家纺等
  */
 
-import type { Shot } from "@backend/db/schema";
 import type { ScriptTemplate } from "./beauty";
 
 export const homeTemplates: ScriptTemplate[] = [

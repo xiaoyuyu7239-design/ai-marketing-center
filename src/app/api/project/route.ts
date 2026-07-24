@@ -2,12 +2,19 @@ import { NextRequest, NextResponse } from "next/server";
 import { getDb } from "@backend/db";
 import { projects } from "@backend/db/schema";
 import { eq, desc } from "drizzle-orm";
+import { requireMerchant } from "@backend/core/auth/require-merchant";
 
-// 获取项目列表
-export async function GET() {
+// 获取项目列表（只返回当前商家自己的项目）
+export async function GET(req: NextRequest) {
+  const auth = await requireMerchant(req);
+  if ("error" in auth) return auth.error;
   try {
     const db = getDb();
-    const result = await db.select().from(projects).orderBy(desc(projects.createdAt));
+    const result = await db
+      .select()
+      .from(projects)
+      .where(eq(projects.merchantId, auth.merchant.id))
+      .orderBy(desc(projects.createdAt));
     return NextResponse.json(result);
   } catch (error) {
     console.error("获取项目列表失败:", error);
@@ -20,6 +27,8 @@ export async function GET() {
 
 // 创建新项目
 export async function POST(req: NextRequest) {
+  const auth = await requireMerchant(req);
+  if ("error" in auth) return auth.error;
   try {
     const body = await req.json();
     const db = getDb();
@@ -28,10 +37,13 @@ export async function POST(req: NextRequest) {
     const VIDEO_MODES = ["product_closeup", "graphic_montage", "scene_demo", "live_presenter"];
     const videoMode = VIDEO_MODES.includes(body.videoMode) ? body.videoMode : undefined;
     const sourceType = body.sourceType === "clone" ? "clone" : undefined;
+    // 图片套装项目走独立生产线页面；topic 由 /api/topic 入口创建，这里只放行显式请求的 image_pack
+    const contentType = body.contentType === "image_pack" ? "image_pack" : undefined;
 
     const newProject = await db
       .insert(projects)
       .values({
+        merchantId: auth.merchant.id,
         name: body.name || "未命名项目",
         productName: body.productName,
         productCategory: body.productCategory,
@@ -42,6 +54,7 @@ export async function POST(req: NextRequest) {
         productImages: body.productImages || [],
         ...(videoMode && { videoMode }),
         ...(sourceType && { sourceType }),
+        ...(contentType && { contentType }),
         ...(body.sourceVideoUrl && { sourceVideoUrl: body.sourceVideoUrl }),
       })
       .returning();

@@ -55,4 +55,20 @@ AGENTS.md
 
 # typescript
 *.tsbuildinfo
-next-env.d.ts
+
+# 独立抠图子工具的依赖（本地免费抠图，独立于主项目 pnpm）
+tools/matting/node_modules/
+
+# 本地研发资料、原型与大体积参考素材（不进入发布候选提交）
+/agent/
+/ai营销的立项/
+/项目/
+/prompt/
+/standalone-landing/
+/vite.config.ts
+/dist-vite/
+/视频/
+/视频参考/
+/视频背景/
+/展示界面.MOV
+/场景设计Agent_可用工具与提示词推导.docx

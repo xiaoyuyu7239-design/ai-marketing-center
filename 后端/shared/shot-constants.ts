@@ -21,5 +21,7 @@ export const STYLE_LABEL_KEYS: Record<string, string> = {
   scene:      "styleScene",
   comparison: "styleComparison",
   story:      "styleStory",
+  mood:       "styleMood",
+  local:      "styleLocal",
   auto:       "styleAuto",
 };

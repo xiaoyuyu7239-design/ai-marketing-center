@@ -24,6 +24,9 @@ import { Input } from "@frontend/components/ui/input";
 import { Textarea } from "@frontend/components/ui/textarea";
 import type {
   AgentConfig,
+  GoldenEvalCaseDto,
+  GoldenEvalPayload,
+  GoldenEvalPromotionDto,
   AgentEvalRecord,
   AgentId,
   AgentPromptVersion,
@@ -36,25 +39,46 @@ import type {
 type EndpointKey = "primary" | "fallback";
 type AdminApiPath = "/api/admin/agents" | "/api/admin/prompts" | "/api/admin/model-evals" | "/api/admin/runs";
 
+const SECRET_REF_OPTIONS: ModelEndpointConfig["secretRef"][] = [
+  "llm.primary",
+  "llm.fallback",
+  "image.primary",
+  "image.fallback",
+  "video.primary",
+  "video.fallback",
+  "tts.primary",
+  "tts.fallback",
+];
+
 const EMPTY_STATE: AgentStrategyState = {
+  strategyRevision: 0,
   onlineVersion: "",
   draftVersion: "",
   publishedAt: "",
   agents: [],
+  onlineAgents: [],
+  draftAgents: [],
+  previousAgents: {},
   prompts: [],
   runs: [],
   evals: [],
+  audit: [],
 };
 
 function mergeState(current: AgentStrategyState, patch: Partial<AgentStrategyState>): AgentStrategyState {
   return {
+    strategyRevision: patch.strategyRevision ?? current.strategyRevision,
     onlineVersion: patch.onlineVersion ?? current.onlineVersion,
     draftVersion: patch.draftVersion ?? current.draftVersion,
     publishedAt: patch.publishedAt ?? current.publishedAt,
     agents: patch.agents ?? current.agents,
+    onlineAgents: patch.onlineAgents ?? current.onlineAgents,
+    draftAgents: patch.draftAgents ?? current.draftAgents,
+    previousAgents: patch.previousAgents ?? current.previousAgents,
     prompts: patch.prompts ?? current.prompts,
     runs: patch.runs ?? current.runs,
     evals: patch.evals ?? current.evals,
+    audit: patch.audit ?? current.audit,
   };
 }
 
@@ -127,13 +151,37 @@ function EndpointEditor({
           <Input value={endpoint.baseUrl} onChange={(e) => onChange({ baseUrl: e.target.value })} className="font-mono text-xs" />
         </label>
         <label className="space-y-1.5 text-xs text-muted-foreground sm:col-span-2">
-          API Key
-          <Input value={endpoint.apiKey} onChange={(e) => onChange({ apiKey: e.target.value })} className="font-mono text-xs" />
+          服务端凭据引用 secretRef
+          <select
+            value={endpoint.secretRef}
+            onChange={(e) => onChange({ secretRef: e.target.value as ModelEndpointConfig["secretRef"] })}
+            className="h-8 w-full rounded-md border border-border bg-background px-2 font-mono text-xs"
+          >
+            {SECRET_REF_OPTIONS.map((secretRef) => <option key={secretRef} value={secretRef}>{secretRef}</option>)}
+          </select>
+          <span className={endpoint.secretConfigured ? "text-emerald-400" : "text-amber-400"}>
+            {endpoint.secretConfigured ? "对应环境凭据已配置" : "对应环境凭据未配置"}
+          </span>
         </label>
         <label className="space-y-1.5 text-xs text-muted-foreground sm:col-span-2">
-          visionModel
+          visionModel（生产须为空或与 model 相同）
           <Input value={endpoint.visionModel ?? ""} onChange={(e) => onChange({ visionModel: e.target.value || undefined })} className="font-mono text-xs" />
         </label>
+        <label className="space-y-1.5 text-xs text-muted-foreground sm:col-span-2">
+          供应商不可变 deploymentRevision
+          <Input value={endpoint.deploymentRevision ?? ""} onChange={(e) => onChange({ deploymentRevision: e.target.value || undefined })} className="font-mono text-xs" />
+        </label>
+        <label className="space-y-1.5 text-xs text-muted-foreground">
+          revisionEvidenceFile
+          <Input value={endpoint.revisionEvidenceFile ?? ""} onChange={(e) => onChange({ revisionEvidenceFile: e.target.value || undefined })} className="font-mono text-xs" />
+        </label>
+        <label className="space-y-1.5 text-xs text-muted-foreground">
+          revisionEvidenceSha256
+          <Input value={endpoint.revisionEvidenceSha256 ?? ""} onChange={(e) => onChange({ revisionEvidenceSha256: e.target.value || undefined })} className="font-mono text-xs" />
+        </label>
+        <p className="text-[11px] text-muted-foreground sm:col-span-2">
+          证据文件必须放在服务端 HUIMAI_MODEL_REVISION_EVIDENCE_DIR；生产预检会逐字节核对 SHA-256，浮动别名不会放行。
+        </p>
       </div>
     </div>
   );
@@ -176,7 +224,8 @@ function useStrategyState(endpoint: AdminApiPath) {
         body: JSON.stringify(saveBody(endpoint, nextState)),
       });
       if (!res.ok) {
-        setMessage("保存失败");
+        const data = await res.json().catch(() => ({}));
+        setMessage(data.error || "保存失败");
         return;
       }
       const saved = await res.json();
@@ -188,13 +237,27 @@ function useStrategyState(endpoint: AdminApiPath) {
 
   const action = (agentId: AgentId, actionName: "publish" | "rollback") => {
     startTransition(async () => {
+      // 发布前先将当前编辑态写入独立 draft 槽，再由服务端原子发布该 Agent。
+      if (actionName === "publish" && endpoint === "/api/admin/agents") {
+        const draftRes = await fetch("/api/admin/agents", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ agents: state.agents }),
+        });
+        if (!draftRes.ok) {
+          const data = await draftRes.json().catch(() => ({}));
+          setMessage(data.error || "草稿保存失败，未发布");
+          return;
+        }
+      }
       const res = await fetch("/api/admin/agents", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ agentId, action: actionName }),
       });
       if (!res.ok) {
-        setMessage(actionName === "publish" ? "发布失败" : "回滚失败");
+        const data = await res.json().catch(() => ({}));
+        setMessage(data.error || (actionName === "publish" ? "发布失败" : "回滚失败"));
         return;
       }
       const saved = await res.json();
@@ -363,9 +426,9 @@ export function AgentsWorkspace() {
     if (selected) {
       const next = {
         ...state,
-        agents: state.agents.map((agent) =>
-          agent.id === selected.id ? { ...agent, previous: { ...agent, previous: undefined }, updatedAt: new Date().toISOString() } : agent,
-        ),
+        agents: state.agents.map((agent) => agent.id === selected.id
+          ? { ...agent, updatedAt: new Date().toISOString() }
+          : agent),
       };
       setState(next);
       save(next);
@@ -381,6 +444,9 @@ export function AgentsWorkspace() {
         <div>
           <p className="text-sm text-muted-foreground">模型策略</p>
           <h1 className="mt-1 text-2xl font-semibold">Agent 模型配置</h1>
+          <p className="mt-1 text-xs text-muted-foreground">
+            修订 r{state.strategyRevision} · 草稿 {state.draftVersion || "-"} · 线上 {state.onlineVersion || "-"}
+          </p>
         </div>
         <div className="relative w-full sm:w-80">
           <Search className="absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
@@ -630,40 +696,324 @@ export function PromptsWorkspace() {
   );
 }
 
-const TEST_CASES = [
-  "给一款无线降噪耳机生成 20 秒短视频脚本，要求输出 JSON。",
-  "围绕“夏天通勤如何防晒”生成一句话主题成片脚本，输出 JSON。",
-  "为一款轻食代餐奶昔生成小红书发布标题、标签和文案，输出 JSON。",
-];
+interface ModelEvalsApiPayload {
+  strategyRevision: number;
+  draftVersion: string;
+  onlineVersion: string;
+  agents: AgentConfig[];
+  prompts: AgentPromptVersion[];
+  evals: AgentEvalRecord[];
+  mediaJobs: GoldenMediaEvalJobDto[];
+  golden: GoldenEvalPayload;
+}
+
+type GoldenMediaEvalJobStatus =
+  | "pending"
+  | "submitting"
+  | "submitted"
+  | "polling"
+  | "succeeded"
+  | "failed"
+  | "submission_uncertain";
+
+interface GoldenMediaEvalJobDto {
+  id: string;
+  agentId: string;
+  caseId: string;
+  candidateRole: "primary" | "fallback";
+  candidateKey: string;
+  provider: string;
+  model: string;
+  promptVersion: string;
+  strategyRevision: number;
+  requestKind: "image-generation" | "video-generation" | "tts-generation";
+  status: GoldenMediaEvalJobStatus;
+  taskIdCheckpointed: boolean;
+  pollAttempts: number;
+  maxPollAttempts: number;
+  errorCode: string | null;
+  errorMessage: string | null;
+  artifactUrls: string[];
+  createdAt: string;
+  startedAt: string | null;
+  submittedAt: string | null;
+  finishedAt: string | null;
+  updatedAt: string;
+  duplicate?: boolean;
+}
+
+const ACTIVE_MEDIA_JOB_STATUSES = new Set<GoldenMediaEvalJobStatus>([
+  "pending",
+  "submitting",
+  "submitted",
+  "polling",
+]);
+
+const EMPTY_GOLDEN: GoldenEvalPayload = {
+  integrityPassed: false,
+  integrityIssues: [],
+  cases: [],
+  promotions: [],
+};
+
+function readinessLabel(goldenCase: GoldenEvalCaseDto | undefined) {
+  if (!goldenCase) return "未选择 case";
+  return goldenCase.ready ? "已就绪" : "未就绪（不会发起付费请求）";
+}
+
+function qualityLabel(value: number | null | undefined) {
+  return typeof value === "number" ? `${value.toFixed(1)} / 100` : "待评分";
+}
+
+function visibleArtifactUrl(value: string) {
+  return (value.startsWith("/") && !value.startsWith("//")) || value.startsWith("https://");
+}
+
+function mediaJobStatusLabel(status: GoldenMediaEvalJobStatus) {
+  if (status === "pending") return "已入队";
+  if (status === "submitting") return "正在单次提交";
+  if (status === "submitted") return "已持久化任务号";
+  if (status === "polling") return "正在恢复轮询";
+  if (status === "succeeded") return "产物已就绪";
+  if (status === "submission_uncertain") return "提交结果未知（禁止重提）";
+  return "失败";
+}
+
+function mediaEvalStorageKey(input: {
+  agentId: AgentId;
+  caseId: string;
+  promptVersion: string;
+  candidates: readonly ("primary" | "fallback")[];
+}) {
+  const fingerprint = JSON.stringify({
+    agentId: input.agentId,
+    caseId: input.caseId,
+    promptVersion: input.promptVersion,
+    candidates: [...input.candidates].sort(),
+  });
+  return `huimai:golden-media-operation:${encodeURIComponent(fingerprint)}`;
+}
+
+function persistentMediaOperationKey(storageKey: string) {
+  try {
+    const existing = window.localStorage.getItem(storageKey);
+    if (existing) return existing;
+    const created = window.crypto.randomUUID();
+    window.localStorage.setItem(storageKey, created);
+    if (window.localStorage.getItem(storageKey) !== created) throw new Error("write verification failed");
+    return created;
+  } catch {
+    throw new Error("浏览器无法持久化评测幂等键，为避免断网后重复计费，已禁止发起媒体评测");
+  }
+}
+
+function clearPersistentMediaOperationKey(storageKey: string) {
+  try {
+    window.localStorage.removeItem(storageKey);
+  } catch {
+    // 入队成功后即使清理失败，同键重放也只会返回原 job。
+  }
+}
+
+function PromotionCard({ promotion }: { promotion: GoldenEvalPromotionDto }) {
+  return (
+    <div className="rounded-md border border-border bg-background/40 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="font-mono text-xs">{promotion.candidateKey}</p>
+        <Badge variant={promotion.passed ? "secondary" : "outline"} className={promotion.passed ? "text-emerald-400" : "text-amber-400"}>
+          {promotion.passed ? "达到晋级线" : "未达晋级线"}
+        </Badge>
+      </div>
+      <p className="mt-2 text-xs text-muted-foreground">
+        {promotion.sampleCount} 次 · {promotion.distinctCaseCount} 个不同 case · 成功 {fmtPct(promotion.successRate)} · 结构 {promotion.structurePassRate === null ? "不适用" : fmtPct(promotion.structurePassRate)} · 质量 {qualityLabel(promotion.qualityScore)} · P95 {promotion.p95LatencyMs} ms
+      </p>
+      <p className="mt-1 text-xs text-muted-foreground">
+        成本覆盖 {fmtPct(promotion.costCoverageRate)} · 平均真实成本 {promotion.averageActualCostUsd === null ? "未知（未伪造为 0）" : `$${promotion.averageActualCostUsd.toFixed(6)}`}
+      </p>
+      {promotion.failures.length ? <p className="mt-2 text-xs text-amber-400">{promotion.failures.join("；")}</p> : null}
+    </div>
+  );
+}
 
 export function ModelEvalsWorkspace() {
-  const { state, setState, save, message, loading, loadError, isPending } = useStrategyState("/api/admin/model-evals");
-  const [agentId, setAgentId] = useState<AgentId>(state.agents[0]?.id ?? "script");
-  const agent = state.agents.find((item) => item.id === agentId) ?? state.agents[0];
-  const promptVersions = state.prompts.filter((prompt) => prompt.agentId === agentId);
-  const [promptVersion, setPromptVersion] = useState(promptVersions[0]?.version ?? agent?.promptVersion ?? "");
-  const effectivePromptVersion = promptVersion || promptVersions[0]?.version || agent?.promptVersion || "";
-  const [testCase, setTestCase] = useState(TEST_CASES[0]);
-  const [candidates, setCandidates] = useState<string[]>(["primary", "fallback"]);
+  const [payload, setPayload] = useState<ModelEvalsApiPayload>({
+    strategyRevision: 0,
+    draftVersion: "",
+    onlineVersion: "",
+    agents: [],
+    prompts: [],
+    evals: [],
+    mediaJobs: [],
+    golden: EMPTY_GOLDEN,
+  });
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const [requestError, setRequestError] = useState("");
+  const [agentId, setAgentId] = useState<AgentId>("script");
+  const [caseId, setCaseId] = useState("");
+  const [candidates, setCandidates] = useState<Array<"primary" | "fallback">>(["primary", "fallback"]);
   const [running, setRunning] = useState(false);
+  const [reviewingId, setReviewingId] = useState("");
+  const [humanScores, setHumanScores] = useState<Record<string, Record<string, number | "">>>({});
 
-  const evals = state.evals.filter((item) => item.agentId === agentId).slice(0, 12);
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/admin/model-evals")
+      .then(async (res) => {
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || "评测数据加载失败");
+        return data as ModelEvalsApiPayload;
+      })
+      .then((data) => {
+        if (!alive) return;
+        setPayload({ ...data, mediaJobs: data.mediaJobs ?? [] });
+        if (!data.agents.some((agent) => agent.id === agentId) && data.agents[0]) setAgentId(data.agents[0].id);
+      })
+      .catch((error) => {
+        if (alive) setLoadError(error instanceof Error ? error.message : "评测数据加载失败");
+      })
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+    return () => { alive = false; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const hasActiveMediaJobs = payload.mediaJobs.some((job) => ACTIVE_MEDIA_JOB_STATUSES.has(job.status));
+  useEffect(() => {
+    if (!hasActiveMediaJobs) return;
+    let alive = true;
+    let inFlight = false;
+    const refresh = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const res = await fetch("/api/admin/model-evals", { cache: "no-store" });
+        const data = await res.json().catch(() => ({})) as Partial<ModelEvalsApiPayload> & { error?: string };
+        if (!res.ok) throw new Error(data.error || "评测任务状态加载失败");
+        if (alive) setPayload(data as ModelEvalsApiPayload);
+      } catch (error) {
+        if (alive) setRequestError(error instanceof Error ? error.message : "评测任务状态加载失败");
+      } finally {
+        inFlight = false;
+      }
+    };
+    const timer = window.setInterval(() => void refresh(), 3_000);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, [hasActiveMediaJobs]);
+
+  const agent = payload.agents.find((item) => item.id === agentId) ?? payload.agents[0];
+  const cases = payload.golden.cases.filter((item) => item.agentId === agentId);
+  const selectedCase = cases.find((item) => item.id === caseId) ?? cases[0];
+  const evals = payload.evals.filter((item) => item.agentId === agentId).slice(0, 20);
+  const promotions = payload.golden.promotions.filter((item) => item.agentId === agentId);
+  const mediaJobs = payload.mediaJobs.filter((item) => item.agentId === agentId).slice(0, 20);
+  const selectedMediaJobs = mediaJobs.filter((job) =>
+    job.caseId === selectedCase?.id && candidates.includes(job.candidateRole));
+  const selectedMediaJobActive = selectedMediaJobs.some((job) => ACTIVE_MEDIA_JOB_STATUSES.has(job.status));
+  const selectedMediaJobUncertain = selectedMediaJobs.some((job) =>
+    job.status === "submission_uncertain"
+    || (job.status === "failed" && job.taskIdCheckpointed && job.errorCode === "POLL_TIMEOUT"));
 
   const startEval = async () => {
+    if (!agent || !selectedCase || !selectedCase.ready || candidates.length === 0) return;
+    if (selectedMediaJobUncertain) {
+      setRequestError("该候选存在提交结果未知或轮询超时任务，需先去供应商后台核对，为避免第二笔计费已禁止重提");
+      return;
+    }
+    if (selectedMediaJobActive) {
+      setRequestError("该候选已有持久评测任务在执行，请等待状态收敛");
+      return;
+    }
+    setRequestError("");
     setRunning(true);
-    const res = await fetch("/api/admin/model-evals", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ agentId, promptVersion: effectivePromptVersion, testCase, candidates }),
-    });
-    setRunning(false);
-    if (!res.ok) return;
-    const data = await res.json();
-    setState({ ...state, evals: [...(data.results as AgentEvalRecord[]), ...state.evals] });
+    let operationStorageKey = "";
+    try {
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (selectedCase.outputKind === "media") {
+        operationStorageKey = mediaEvalStorageKey({
+          agentId,
+          caseId: selectedCase.id,
+          promptVersion: agent.promptVersion,
+          candidates,
+        });
+        headers["Idempotency-Key"] = persistentMediaOperationKey(operationStorageKey);
+      }
+      const res = await fetch("/api/admin/model-evals", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          agentId,
+          caseId: selectedCase.id,
+          promptVersion: agent.promptVersion,
+          candidateRoles: candidates,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        if (operationStorageKey && res.status < 500) clearPersistentMediaOperationKey(operationStorageKey);
+        setRequestError(data.error || "评测失败");
+        return;
+      }
+      if (selectedCase.outputKind === "media") {
+        if (res.status !== 202 || !Array.isArray(data.jobs) || data.jobs.length === 0) {
+          throw new Error("媒体评测入队回执不完整；已保留幂等键，请重试查询原任务");
+        }
+        clearPersistentMediaOperationKey(operationStorageKey);
+        const acceptedJobs = data.jobs as GoldenMediaEvalJobDto[];
+        setPayload((current) => {
+          const acceptedIds = new Set(acceptedJobs.map((job) => job.id));
+          return {
+            ...current,
+            mediaJobs: [...acceptedJobs, ...current.mediaJobs.filter((job) => !acceptedIds.has(job.id))],
+            golden: {
+              ...current.golden,
+              promotions: data.golden?.promotions ?? current.golden.promotions,
+            },
+          };
+        });
+        return;
+      }
+      setPayload((current) => ({
+        ...current,
+        evals: [...(data.results as AgentEvalRecord[]), ...current.evals],
+        golden: {
+          ...current.golden,
+          promotions: data.golden?.promotions ?? current.golden.promotions,
+        },
+      }));
+    } catch (error) {
+      setRequestError(error instanceof Error ? error.message : "评测请求失败");
+    } finally {
+      setRunning(false);
+    }
   };
 
-  const updateScore = (id: string, score: number) => {
-    setState({ ...state, evals: state.evals.map((item) => item.id === id ? { ...item, score } : item) });
+  const saveHumanReview = async (record: AgentEvalRecord) => {
+    const scores = humanScores[record.id] ?? {};
+    setReviewingId(record.id);
+    setRequestError("");
+    const res = await fetch("/api/admin/model-evals", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ evalId: record.id, scores }),
+    });
+    const data = await res.json().catch(() => ({}));
+    setReviewingId("");
+    if (!res.ok) {
+      setRequestError([data.error, ...(data.issues ?? [])].filter(Boolean).join("："));
+      return;
+    }
+    setPayload((current) => ({
+      ...current,
+      evals: current.evals.map((item) => item.id === record.id ? data.record : item),
+      golden: {
+        ...current.golden,
+        promotions: data.golden?.promotions ?? current.golden.promotions,
+      },
+    }));
   };
 
   if (loading) return <LoadingPanel title="模型评测" />;
@@ -672,26 +1022,35 @@ export function ModelEvalsWorkspace() {
   return (
     <div className="space-y-5">
       <div>
-        <p className="text-sm text-muted-foreground">模型对比</p>
+        <p className="text-sm text-muted-foreground">Golden Set 候选模型对比</p>
         <h1 className="mt-1 text-2xl font-semibold">模型评测</h1>
+        <p className="mt-1 text-xs text-muted-foreground">
+          只评测当前 draft 槽（{payload.draftVersion || "-"}）的 primary / fallback，每个候选独立执行，不自动 fallback。
+        </p>
       </div>
 
+      {!payload.golden.integrityPassed ? (
+        <section className="rounded-lg border border-destructive/40 bg-destructive/5 p-4 text-sm text-destructive">
+          Golden Set 完整性校验未通过：{payload.golden.integrityIssues.join("；") || "未知错误"}
+        </section>
+      ) : null}
+
       <section className="rounded-lg border border-border bg-card p-4">
-        <div className="grid gap-4 lg:grid-cols-4">
+        <div className="grid gap-4 lg:grid-cols-3">
           <label className="space-y-1.5 text-xs text-muted-foreground">
             选择 Agent
-            <select value={agentId} onChange={(e) => { setAgentId(e.target.value as AgentId); setPromptVersion(""); }} className="h-8 w-full rounded-md border border-border bg-background px-2 text-sm">
-              {state.agents.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+            <select value={agentId} onChange={(e) => { setAgentId(e.target.value as AgentId); setCaseId(""); }} className="h-8 w-full rounded-md border border-border bg-background px-2 text-sm">
+              {payload.agents.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
             </select>
           </label>
           <label className="space-y-1.5 text-xs text-muted-foreground">
-            prompt 版本
-            <select value={effectivePromptVersion} onChange={(e) => setPromptVersion(e.target.value)} className="h-8 w-full rounded-md border border-border bg-background px-2 text-sm">
-              {promptVersions.map((prompt) => <option key={prompt.id} value={prompt.version}>{prompt.version}</option>)}
+            Golden case
+            <select value={selectedCase?.id ?? ""} onChange={(e) => setCaseId(e.target.value)} className="h-8 w-full rounded-md border border-border bg-background px-2 text-sm">
+              {cases.map((item) => <option key={item.id} value={item.id}>{item.ready ? "●" : "○"} {item.name}</option>)}
             </select>
           </label>
           <div className="space-y-1.5 text-xs text-muted-foreground">
-            候选模型
+            draft 候选槽
             <div className="flex h-8 items-center gap-3">
               {(["primary", "fallback"] as const).map((name) => (
                 <label key={name} className="flex items-center gap-1.5 text-sm text-foreground">
@@ -702,74 +1061,178 @@ export function ModelEvalsWorkspace() {
                       setCandidates((items) => e.target.checked ? [...items, name] : items.filter((item) => item !== name))
                     }
                   />
-                  {name === "primary" ? "主模型" : "备用模型"}
+                  {name === "primary" ? "primary" : "fallback"}
                 </label>
               ))}
             </div>
           </div>
-          <div className="flex items-end">
-            <Button onClick={startEval} disabled={running || candidates.length === 0} className="w-full">
-              <FlaskConical className="size-4" />
-              {running ? "评测中" : "开始评测"}
-            </Button>
-          </div>
         </div>
-        <div className="mt-4 grid gap-3 lg:grid-cols-[260px_1fr]">
-          <label className="space-y-1.5 text-xs text-muted-foreground">
-            测试样例
-            <select value={testCase} onChange={(e) => setTestCase(e.target.value)} className="h-8 w-full rounded-md border border-border bg-background px-2 text-sm">
-              {TEST_CASES.map((item) => <option key={item} value={item}>{item.slice(0, 22)}...</option>)}
-            </select>
-          </label>
-          <label className="space-y-1.5 text-xs text-muted-foreground">
-            样例内容
-            <Textarea value={testCase} onChange={(e) => setTestCase(e.target.value)} rows={3} className="text-sm" />
-          </label>
+        <div className="mt-4 rounded-md border border-border bg-background/40 p-3 text-xs">
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant={selectedCase?.ready ? "secondary" : "outline"} className={selectedCase?.ready ? "text-emerald-400" : "text-amber-400"}>
+              {readinessLabel(selectedCase)}
+            </Badge>
+            <span className="font-mono text-muted-foreground">{selectedCase?.requestKind ?? "-"}</span>
+            <span className="text-muted-foreground">prompt {agent?.promptVersion ?? "-"}</span>
+          </div>
+          <p className="mt-2 text-muted-foreground">{selectedCase?.readinessReason ?? "该 Agent 暂无 Golden case"}</p>
+          {selectedCase?.fixtures.map((fixture) => (
+            <p key={fixture.fixtureId} className={fixture.ready ? "mt-1 text-emerald-400" : "mt-1 text-amber-400"}>
+              fixture {fixture.fixtureId}：{fixture.reason}
+            </p>
+          ))}
+          <div className="mt-3 grid gap-2 md:grid-cols-2">
+            {(["primary", "fallback"] as const).map((role) => (
+              <p key={role} className="font-mono text-muted-foreground">
+                {role}: {agent ? `${agent[role].provider}/${selectedCase?.requestKind === "vision-json" ? agent[role].visionModel || agent[role].model : agent[role].model}` : "-"}
+                {agent?.[role].secretConfigured ? " · 凭据已配置" : " · 凭据未配置"}
+              </p>
+            ))}
+          </div>
+          {selectedMediaJobUncertain ? (
+            <p className="mt-3 text-destructive">存在计费结果待核对任务：请先核对供应商后台，本页不会自动或手动重提。</p>
+          ) : null}
+          <Button
+            onClick={startEval}
+            disabled={running
+              || candidates.length === 0
+              || !selectedCase?.ready
+              || !payload.golden.integrityPassed
+              || selectedMediaJobActive
+              || selectedMediaJobUncertain}
+            className="mt-3 w-full md:w-auto"
+          >
+            <FlaskConical className="size-4" />
+            {running ? "正在入队" : selectedMediaJobActive ? "持久任务执行中" : "执行锁定 Golden case"}
+          </Button>
+        </div>
+      </section>
+
+      {requestError ? (
+        <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">{requestError}</div>
+      ) : null}
+
+      {mediaJobs.length ? (
+        <section className="space-y-3 rounded-lg border border-border bg-card p-4">
+          <div>
+            <h2 className="text-sm font-semibold">媒体评测持久任务</h2>
+            <p className="mt-1 text-xs text-muted-foreground">提交与轮询已从 HTTP 请求分离；页面关闭或服务重启后仍可恢复查询。</p>
+          </div>
+          <div className="grid gap-3 xl:grid-cols-2">
+            {mediaJobs.map((job) => {
+              const uncertain = job.status === "submission_uncertain"
+                || (job.status === "failed" && job.taskIdCheckpointed && job.errorCode === "POLL_TIMEOUT");
+              const failed = job.status === "failed";
+              const succeeded = job.status === "succeeded";
+              return (
+                <div key={job.id} className={`rounded-md border p-3 ${uncertain ? "border-destructive/60 bg-destructive/5" : "border-border bg-background/40"}`}>
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div>
+                      <p className="font-mono text-xs">{job.provider}/{job.model}</p>
+                      <p className="mt-1 text-xs text-muted-foreground">{job.caseId} · {job.candidateRole} · {new Date(job.createdAt).toLocaleString("zh-CN")}</p>
+                    </div>
+                    <Badge
+                      variant={uncertain || failed ? "destructive" : succeeded ? "secondary" : "outline"}
+                      className={succeeded ? "text-emerald-400" : ""}
+                    >
+                      {mediaJobStatusLabel(job.status)}
+                    </Badge>
+                  </div>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    {job.requestKind === "tts-generation"
+                      ? "TTS one-shot（无 taskId，仅执行一次）"
+                      : `taskId ${job.taskIdCheckpointed ? "已安全持久化" : "尚未持久化"} · 轮询 ${job.pollAttempts}/${job.maxPollAttempts}`}
+                  </p>
+                  {job.errorMessage ? <p className={`mt-2 text-xs ${uncertain || failed ? "text-destructive" : "text-amber-400"}`}>{job.errorCode ? `${job.errorCode}：` : ""}{job.errorMessage}</p> : null}
+                  {uncertain ? (
+                    <p className="mt-2 text-xs font-medium text-destructive">此状态不能证明供应商未收费或任务未完成，系统已禁止该候选重提。</p>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      ) : null}
+
+      <section className="space-y-3 rounded-lg border border-border bg-card p-4">
+        <div>
+          <h2 className="text-sm font-semibold">候选晋级汇总</h2>
+          <p className="mt-1 text-xs text-muted-foreground">按 Agent + candidateKey 聚合；真实成本缺失时保持未知，不以 0 填充。</p>
+        </div>
+        <div className="grid gap-3 xl:grid-cols-2">
+          {promotions.map((promotion) => <PromotionCard key={promotion.candidateKey} promotion={promotion} />)}
+          {!promotions.length ? <p className="text-xs text-muted-foreground">还没有足够的 Golden 评测记录。</p> : null}
         </div>
       </section>
 
       <section className="grid gap-4 xl:grid-cols-2">
-        {evals.map((item) => (
+        {evals.map((item) => {
+          const itemCase = payload.golden.cases.find((goldenCase) => goldenCase.id === item.caseId);
+          const needsHumanReview = item.status === "awaiting-human-review" && itemCase?.outputKind === "media";
+          return (
           <div key={item.id} className="rounded-lg border border-border bg-card p-4">
             <div className="flex items-start justify-between gap-3">
               <div>
                 <p className="font-mono text-sm">{item.provider}/{item.candidateModel}</p>
-                <p className="mt-1 text-xs text-muted-foreground">{item.promptVersion} · {item.latencyMs} ms · {new Date(item.createdAt).toLocaleString("zh-CN")}</p>
+                <p className="mt-1 text-xs text-muted-foreground">{item.caseId || item.testCase} · {item.candidateRole || "legacy"} · {item.latencyMs} ms · {new Date(item.createdAt).toLocaleString("zh-CN")}</p>
               </div>
               <div className="flex gap-1">
                 <Badge variant={item.errored ? "destructive" : "secondary"}>{item.errored ? "报错" : "完成"}</Badge>
-                <Badge variant={item.jsonParsed ? "secondary" : "outline"} className={item.jsonParsed ? "text-emerald-400" : ""}>
-                  JSON {item.jsonParsed ? "成功" : "失败"}
+                <Badge variant={item.structurePassed ? "secondary" : "outline"} className={item.structurePassed ? "text-emerald-400" : ""}>
+                  {item.requestKind?.endsWith("json") ? `结构 ${item.structurePassed ? "通过" : "失败"}` : item.status === "awaiting-human-review" ? "待人工评审" : "媒体"}
                 </Badge>
               </div>
             </div>
-            <pre className="mt-3 max-h-64 overflow-auto rounded-md bg-muted/40 p-3 text-xs whitespace-pre-wrap">{item.output}</pre>
-            <div className="mt-3 flex items-center justify-between gap-3">
-              <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                人工打分
-                <Input
-                  type="number"
-                  min="0"
-                  max="10"
-                  value={item.score ?? ""}
-                  onChange={(e) => updateScore(item.id, Number(e.target.value))}
-                  className="h-7 w-20"
-                />
-              </label>
-              <Button size="sm" variant="outline" onClick={() => save()} disabled={isPending}>
-                <Save className="size-3.5" />
-                保存分数
-              </Button>
+            <div className="mt-3 grid grid-cols-2 gap-2 rounded-md bg-muted/30 p-3 text-xs text-muted-foreground">
+              <span>质量分：{qualityLabel(item.qualityScore)}</span>
+              <span>真实成本：{item.actualCostUsd === null || item.actualCostUsd === undefined ? "未知" : `$${item.actualCostUsd.toFixed(6)}`}</span>
+              <span className="col-span-2 font-mono">{item.candidateKey || "legacy record"}</span>
             </div>
+            <pre className="mt-3 max-h-64 overflow-auto rounded-md bg-muted/40 p-3 text-xs whitespace-pre-wrap">{item.output}</pre>
+            {item.artifactUrls?.some(visibleArtifactUrl) ? (
+              <div className="mt-3 flex flex-wrap gap-2 text-xs">
+                {item.artifactUrls.filter(visibleArtifactUrl).map((url, index) => <a key={`${url}-${index}`} href={url} target="_blank" rel="noreferrer" className="text-primary underline">审核产物 {index + 1}</a>)}
+              </div>
+            ) : null}
+            {needsHumanReview && itemCase ? (
+              <div className="mt-3 space-y-3 border-t border-border pt-3">
+                <p className="text-xs font-medium">媒体人工 rubric（1-5 分，所有项必填）</p>
+                {itemCase.rubric.map((criterion) => (
+                  <label key={criterion.id} className="block space-y-1 text-xs text-muted-foreground">
+                    {criterion.label} · 权重 {criterion.weight}%
+                    <p>{criterion.guidance}</p>
+                    <Input
+                      type="number"
+                      min="1"
+                      max="5"
+                      step="1"
+                      value={humanScores[item.id]?.[criterion.id] ?? ""}
+                      onChange={(event) => setHumanScores((current) => ({
+                        ...current,
+                        [item.id]: {
+                          ...current[item.id],
+                          [criterion.id]: event.target.value ? Number(event.target.value) : "",
+                        },
+                      }))}
+                      className="h-8 w-24"
+                    />
+                  </label>
+                ))}
+                <Button size="sm" variant="outline" onClick={() => saveHumanReview(item)} disabled={reviewingId === item.id}>
+                  <Save className="size-3.5" />
+                  {reviewingId === item.id ? "保存中" : "保存 rubric 评分"}
+                </Button>
+              </div>
+            ) : null}
           </div>
-        ))}
+          );
+        })}
         {evals.length === 0 ? (
           <div className="rounded-lg border border-dashed border-border p-8 text-center text-sm text-muted-foreground xl:col-span-2">
-            暂无评测记录，选择 Agent 和候选模型后开始评测。
+            暂无评测记录，选择已就绪 Golden case 和 draft 候选槽后开始。
           </div>
         ) : null}
       </section>
-      {message ? <p className="text-xs text-emerald-400">{message}</p> : null}
     </div>
   );
 }
@@ -832,23 +1295,29 @@ export function RunsWorkspace() {
             <thead className="text-left text-xs text-muted-foreground">
               <tr className="border-b border-border">
                 <th className="px-4 py-3 font-medium">时间</th>
-                <th className="px-4 py-3 font-medium">用户/项目</th>
+                <th className="px-4 py-3 font-medium">请求/项目</th>
                 <th className="px-4 py-3 font-medium">agent</th>
                 <th className="px-4 py-3 font-medium">实际 provider/model</th>
                 <th className="px-4 py-3 font-medium">fallback</th>
                 <th className="px-4 py-3 font-medium">状态</th>
                 <th className="px-4 py-3 font-medium">失败原因</th>
                 <th className="px-4 py-3 font-medium">耗时</th>
-                <th className="px-4 py-3 font-medium">成本估算</th>
+                <th className="px-4 py-3 font-medium">真实成本</th>
               </tr>
             </thead>
             <tbody>
               {runs.map((run: AgentRunRecord) => (
                 <tr key={run.id} className="border-b border-border/70 last:border-0">
                   <td className="px-4 py-3 text-xs text-muted-foreground">{new Date(run.createdAt).toLocaleString("zh-CN")}</td>
-                  <td className="px-4 py-3 font-mono text-xs">{run.userLabel}</td>
+                  <td className="px-4 py-3 font-mono text-xs">
+                    <div>{run.userLabel}</div>
+                    <div className="mt-1 text-[10px] text-muted-foreground">{run.requestId} · attempt {run.attempt}</div>
+                  </td>
                   <td className="px-4 py-3">{run.agentName}</td>
-                  <td className="px-4 py-3 font-mono text-xs">{run.provider}/{run.model}</td>
+                  <td className="px-4 py-3 font-mono text-xs">
+                    <div>{run.provider}/{run.model}</div>
+                    <div className="mt-1 text-[10px] text-muted-foreground">{run.endpointRole} · r{run.strategyRevision} · {run.codeVersion}</div>
+                  </td>
                   <td className="px-4 py-3">
                     <Badge variant={run.fallbackTriggered ? "outline" : "ghost"}>{run.fallbackTriggered ? "是" : "否"}</Badge>
                   </td>
@@ -857,9 +1326,12 @@ export function RunsWorkspace() {
                       {run.success ? "成功" : "失败"}
                     </Badge>
                   </td>
-                  <td className="max-w-64 px-4 py-3 text-xs text-destructive">{run.errorReason || "-"}</td>
+                  <td className="max-w-64 px-4 py-3 text-xs text-destructive">
+                    {run.errorCategory ? <div className="mb-1 font-mono text-[10px]">{run.errorCategory}</div> : null}
+                    {run.errorReason || run.fallbackReason || "-"}
+                  </td>
                   <td className="px-4 py-3">{run.latencyMs} ms</td>
-                  <td className="px-4 py-3">${run.costEstimateUsd.toFixed(4)}</td>
+                  <td className="px-4 py-3">{run.costUsd == null ? "未知" : `$${run.costUsd.toFixed(4)}`}</td>
                 </tr>
               ))}
             </tbody>

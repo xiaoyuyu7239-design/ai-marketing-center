@@ -20,6 +20,7 @@ import {
   LuQrCode,
   LuScanLine,
   LuLanguages,
+  LuMapPin,
 } from "react-icons/lu";
 import Link from "next/link";
 import { Card, CardContent } from "@frontend/components/ui/card";
@@ -28,16 +29,21 @@ import { Badge } from "@frontend/components/ui/badge";
 import { useT, useLocale } from "@frontend/i18n";
 import { LanguageToggle } from "@frontend/components/language-toggle";
 import { PerformanceFeedback } from "@frontend/components/performance-feedback";
+import { PrePublishDiagnosis } from "@frontend/components/prepublish-diagnosis";
+import { VideoRetro } from "@frontend/components/video-retro";
 import { BrandWheatMark } from "@frontend/components/brand-wheat-logo";
-import { useSettingsStore } from "@frontend/stores/settings-store";
 import { useVideoApprovalStore } from "@frontend/stores/video-approval-store";
 import { STYLE_LABEL_KEYS } from "@backend/shared/shot-constants";
 import { StepProgressIndicator } from "@frontend/components/step-progress";
 import { pollComposition } from "@backend/shared/poll-composition";
+import { acquireComposeOperation, clearComposeOperation } from "@frontend/lib/compose-operation";
 import { buildShopLink } from "@backend/core/publish/shop-link";
 import { buildPublishPack } from "@backend/core/publish/publish-pack";
+import { buildLocalTagPack, type LocalStoreInfo, type LocalTagPack } from "@backend/core/publish/local-tags";
+import { requiredAttributionText } from "@backend/core/publish/media-credits";
+import type { MediaCredit } from "@backend/core/publish/media-credit-types";
 
-// 平台导出配置（规划中功能，展示用）。name 用 i18n key（nameKey）在渲染时取译文
+// 平台导出配置：卡片按钮触发 /api/project/[id]/export-platform 真实重编码出对应比例成片。name 用 i18n key（nameKey）在渲染时取译文
 const platformConfigs = [
   { id: "douyin", nameKey: "platformDouyin", ratio: "9:16", resolution: "1080p", subtitle: "居中+描边", color: "from-zinc-950 to-zinc-700" },
   { id: "kuaishou", nameKey: "platformKuaishou", ratio: "9:16", resolution: "1080p", subtitle: "贴边框", color: "from-zinc-950 to-zinc-700" },
@@ -58,6 +64,8 @@ interface Composition {
   aspectRatio: string | null;
   status: string;
   createdAt: string | null;
+  aigcDisclosure?: boolean;
+  credits?: MediaCredit[] | null;
 }
 
 interface ScriptInfo {
@@ -81,6 +89,8 @@ interface PublishState {
   caption: string;
   error?: string;
   template?: boolean;
+  /** 同城发布信息（本地门店商家）：POI 清单 + 锚点说明 + 标签用法提示 */
+  local?: LocalTagPack;
 }
 
 type MoreOutputKey = "cover" | "gif" | "carousel" | "qr" | "endCard" | "dub";
@@ -101,7 +111,6 @@ export default function ExportPage() {
   const t = useT("exportPage");
   const tc = useT("common");
   const locale = useLocale();
-  const llm = useSettingsStore((state) => state.llm);
   const { id } = useParams<{ id: string }>();
   const searchParams = useSearchParams();
   const publishReadyMode = searchParams.get("publishReady") === "1";
@@ -110,7 +119,42 @@ export default function ExportPage() {
   const approveProject = useVideoApprovalStore((state) => state.approveProject);
   const unapproveProject = useVideoApprovalStore((state) => state.unapproveProject);
   const markPublishedProject = useVideoApprovalStore((state) => state.markPublishedProject);
-  const workflowStepHrefs = [`/project/${id}/script`, `/project/${id}/assets`, `/project/${id}/video`, `/project/${id}/export`];
+  const unmarkPublishedProject = useVideoApprovalStore((state) => state.unmarkPublishedProject);
+  const authRequired = useVideoApprovalStore((state) => state.authRequired);
+  const lastSyncError = useVideoApprovalStore((state) => state.lastSyncError);
+  const clearSyncError = useVideoApprovalStore((state) => state.clearSyncError);
+  const hydrateApprovalStore = useVideoApprovalStore((state) => state.hydrateFromServer);
+
+  // 认可入库/发布状态在服务端，进页面先水合，否则"已入库/已发布"标记会显示成初始空状态
+  useEffect(() => {
+    void hydrateApprovalStore();
+  }, [hydrateApprovalStore]);
+
+  // 本地门店画像：storeType=local/both 时，发布文案走同城形态（标签梯度 + POI 清单）；免 Key 兜底包也要用
+  const [localStoreInfo, setLocalStoreInfo] = useState<LocalStoreInfo | null>(null);
+  useEffect(() => {
+    let ignore = false;
+    fetch("/api/auth/me", { cache: "no-store" })
+      .then(async (res) => {
+        if (ignore || !res.ok) return;
+        const data = await res.json().catch(() => ({}));
+        const m = data.merchant ?? {};
+        if (m.storeType === "local" || m.storeType === "both") {
+          setLocalStoreInfo({
+            city: m.region ?? null,
+            landmark: m.landmark ?? null,
+            shopName: m.shopName ?? null,
+            storeAddress: m.storeAddress ?? null,
+            customTags: m.customTags ?? null,
+          });
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      ignore = true;
+    };
+  }, []);
+  const workflowStepHrefs = [`/project/${id}/script`, `/project/${id}/assets`, `/project/${id}/motion`, `/project/${id}/video`, `/project/${id}/export`];
   const [toast, setToast] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [projectName, setProjectName] = useState("");
@@ -137,11 +181,21 @@ export default function ExportPage() {
   });
   const isApprovedInventory = Boolean(approvedVideos[id]);
   const isPublished = Boolean(publishedVideos[id]);
+  const mediaCredits = Array.isArray(composition?.credits) ? composition.credits : [];
+  const requiredCreditsText = requiredAttributionText(mediaCredits);
 
   const showToast = (message: string) => {
     setToast(message);
     setTimeout(() => setToast(null), 3000);
   };
+
+  // 同步被服务端拒（如驳回守卫 403）时，把真实错误文案顶掉刚才的乐观"成功"提示，别让用户误以为成功了
+  useEffect(() => {
+    if (lastSyncError) {
+      showToast(lastSyncError);
+      clearSyncError();
+    }
+  }, [lastSyncError, clearSyncError]);
 
   const toggleApprovedInventory = () => {
     if (isApprovedInventory) {
@@ -163,7 +217,8 @@ export default function ExportPage() {
       category: productMeta?.category,
       sellingPoints: productMeta?.description,
       locale: locale === "en" ? "en" : "zh",
-    }), [locale, productMeta?.category, productMeta?.description, productMeta?.productName, projectName]);
+      localStore: localStoreInfo ?? undefined,
+    }), [locale, localStoreInfo, productMeta?.category, productMeta?.description, productMeta?.productName, projectName]);
 
   const hasPublishPack = publish.titles.length > 0 || publish.hashtags.length > 0 || Boolean(publish.caption);
   const fallbackPublishPack = publishReadyMode && !hasPublishPack ? localPublishPack() : null;
@@ -177,6 +232,10 @@ export default function ExportPage() {
       }
     : publish;
   const hasDisplayPublishPack = displayPublish.titles.length > 0 || displayPublish.hashtags.length > 0 || Boolean(displayPublish.caption);
+  // 同城发布清单：AI 文案响应自带的优先，兜底/模板包由本地纯函数现算（同构模块，前后端一致）
+  const displayLocal: LocalTagPack | null = hasDisplayPublishPack && localStoreInfo
+    ? displayPublish.local ?? buildLocalTagPack(localStoreInfo, { category: productMeta?.category })
+    : null;
 
   const ensureLocalPublishPack = () => {
     if (hasPublishPack) return publish;
@@ -193,33 +252,19 @@ export default function ExportPage() {
       readyPack.hashtags.length ? readyPack.hashtags.join(" ") : "",
       readyPack.caption,
       publishShopLink ? `商品链接：${publishShopLink}` : "",
+      requiredCreditsText ? `${t("creditsRequiredHeading")}\n${requiredCreditsText}` : "",
     ].filter(Boolean);
     if (lines.length === 0) return;
     await copyText(lines.join("\n"));
   };
 
-  const markAsPublished = async () => {
+  const markAsPublished = () => {
     if (isPublished) return;
-    markPublishedProject(id, "douyin");
-    showToast("已标记发布，已从待发布移除");
-    try {
-      await fetch(`/api/project/${id}/metrics`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          platform: "douyin",
-          views: 0,
-          likes: 0,
-          comments: 0,
-          shares: 0,
-          orders: 0,
-          note: "manual_published_marker",
-          publishedAt: Date.now(),
-        }),
-      });
-    } catch {
-      // 本地已发布状态优先生效；后端回流失败不阻断用户发布流程。
-    }
+    // 不臆造发布平台——老板在哪个 App 发的我们并不知道，platform 留空好过写死一个错的
+    // 发布时间只由 publish_records 记录；真实播放/互动数据等老板回填后再进 publish_metrics。
+    // 不能在这里塞一条全 0 metrics，否则会被误判为“已回填”并污染发布时段校准。
+    markPublishedProject(id);
+    showToast("已标记发布，已从待发布移除；点错可再点一次撤销");
   };
 
   // 顺序重渲每个 A/B 变体（不同字幕风格+配乐），完成一条出一条下载链接；全程免 Key
@@ -229,20 +274,34 @@ export default function ExportPage() {
     setAbVariants(AB_PRESETS.map((p) => ({ key: p.key, labelKey: p.labelKey, status: "running" as const })));
     for (const p of AB_PRESETS) {
       try {
+        const composePayload = {
+          resolution: composition?.resolution === "720p" ? "720p" : "1080p",
+          aspectRatio: composition?.aspectRatio || "9:16",
+          freeTts: { enabled: true },
+          freeBgm: true,
+          ...p.compose,
+        };
+        const composeOperation = acquireComposeOperation(id, `export-ab-${p.key}`, composePayload);
         const res = await fetch(`/api/project/${id}/compose`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            resolution: composition?.resolution === "720p" ? "720p" : "1080p",
-            aspectRatio: composition?.aspectRatio || "9:16",
-            freeTts: { enabled: true },
-            freeBgm: true,
-            ...p.compose,
-          }),
+          headers: {
+            "Content-Type": "application/json",
+            "Idempotency-Key": composeOperation.idempotencyKey,
+          },
+          body: JSON.stringify(composePayload),
         });
-        if (!res.ok) throw new Error("compose failed");
+        if (!res.ok) {
+          clearComposeOperation(composeOperation);
+          throw new Error("compose failed");
+        }
         const { compositionId } = await res.json();
-        const url = await pollComposition(id, compositionId);
+        if (typeof compositionId !== "string" || !compositionId) throw new Error("compose id missing");
+        const url = await pollComposition(id, compositionId, {
+          onStatus: (status) => {
+            if (status === "done" || status === "failed") clearComposeOperation(composeOperation);
+          },
+        });
+        clearComposeOperation(composeOperation);
         setAbVariants((prev) => prev.map((x) => (x.key === p.key ? { ...x, status: "done", url } : x)));
       } catch {
         setAbVariants((prev) => prev.map((x) => (x.key === p.key ? { ...x, status: "error" } : x)));
@@ -321,10 +380,8 @@ export default function ExportPage() {
 
   const generateDubScript = () =>
     runMoreOutput("dub", async () => {
-      if (!llm.baseUrl || !llm.model) throw new Error(t("moreDubNeedLlm"));
       const data = await postMoreOutput("dub", {
         targetLang: dubLang,
-        llmConfig: { baseUrl: llm.baseUrl, apiKey: llm.apiKey, model: llm.model },
       });
       const voice = typeof data.recommendedVoice === "string" ? data.recommendedVoice : "";
       return { note: t("moreDubDone", { lang: dubLang.toUpperCase(), voice }) };
@@ -345,7 +402,7 @@ export default function ExportPage() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || t("publishFailed"));
-      setPublish({ loading: false, titles: data.titles ?? [], hashtags: data.hashtags ?? [], caption: data.caption ?? "" });
+      setPublish({ loading: false, titles: data.titles ?? [], hashtags: data.hashtags ?? [], caption: data.caption ?? "", local: data.local ?? undefined });
     } catch (e) {
       const pack = localPublishPack();
       setPublish({ loading: false, titles: pack.titles, hashtags: pack.hashtags, caption: pack.caption, template: true });
@@ -482,8 +539,8 @@ export default function ExportPage() {
           {/* 步骤胶囊在窄屏放不下，移动端隐藏（仅进度展示、非导航） */}
           <div className="hidden sm:flex items-center gap-1">
             <StepProgressIndicator
-              steps={[t("stepScript"), t("stepAssets"), t("stepVideo"), t("stepExport")]}
-              activeIndex={3}
+              steps={[t("stepScript"), t("stepAssets"), t("stepMotion"), t("stepVideo"), t("stepExport")]}
+              activeIndex={4}
               hrefs={workflowStepHrefs}
               backLabel={tc("backPrevStep")}
             />
@@ -505,8 +562,22 @@ export default function ExportPage() {
     );
   }
 
-  // 空态：还没有合成视频
+  // 空态：还没有合成视频（未登录/会话过期时如实提示去登录，而不是误导"去合成"）
   if (!composition || !composition.url) {
+    if (authRequired) {
+      return (
+        <div className="workflow-light min-h-screen grid-bg">
+          {headerBar}
+          <div className="mx-auto max-w-md flex flex-col items-center justify-center py-28 px-6 text-center">
+            <h2 className="text-lg font-semibold mb-2">请先登录</h2>
+            <p className="text-sm text-muted-foreground mb-6">登录后才能查看这个项目的成片与发布材料。</p>
+            <Link href="/project/agent">
+              <Button className="brand-gradient text-white">去创作工作台登录</Button>
+            </Link>
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="workflow-light min-h-screen grid-bg">
         {headerBar}
@@ -615,16 +686,23 @@ export default function ExportPage() {
           </a>
           <Button
             variant={isPublished ? "outline" : "default"}
-            onClick={markAsPublished}
-            disabled={isPublished}
+            onClick={() => {
+              if (isPublished) {
+                // 误点可撤销：撤销后重新回到今日待发布候选
+                unmarkPublishedProject(id);
+                showToast("已撤销发布标记，重新回到待发布");
+                return;
+              }
+              void markAsPublished();
+            }}
             className={`h-11 px-6 text-sm font-semibold ${
               isPublished
-                ? "border-[#DDE2E8] bg-white text-[#6B7280]"
+                ? "border-[#DDE2E8] bg-white text-[#6B7280] hover:bg-[#F3F4F6]"
                 : "bg-[#111111] text-white hover:bg-[#2B2B2B]"
             }`}
           >
             <LuCheck className="w-[18px] h-[18px] mr-2" />
-            {isPublished ? "已发布" : "标记已发布"}
+            {isPublished ? "已发布（点击撤销）" : "标记已发布"}
           </Button>
           {publishReadyMode ? (
             <Button
@@ -673,6 +751,45 @@ export default function ExportPage() {
                 </div>
               ))}
             </div>
+          </CardContent>
+        </Card>
+
+        <Card className="glass-card mb-6">
+          <CardContent className="p-5">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-semibold">{t("creditsTitle")}</h3>
+                <p className="mt-1 text-xs text-muted-foreground">{t("creditsDesc")}</p>
+              </div>
+              {requiredCreditsText ? (
+                <Button size="sm" variant="outline" className="shrink-0 text-xs" onClick={() => copyText(requiredCreditsText)}>
+                  {t("creditsCopy")}
+                </Button>
+              ) : null}
+            </div>
+            <p className="mt-3 rounded-lg bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+              {t("creditsUserOwned")}
+            </p>
+            {mediaCredits.length > 0 ? (
+              <div className="mt-3 space-y-2">
+                {mediaCredits.map((credit) => (
+                  <div key={`${credit.mediaType}:${credit.sourceUrl}`} className="rounded-lg border border-border/50 p-3 text-xs">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-semibold text-foreground">{credit.author}</span>
+                      <span className="text-muted-foreground">{credit.license}</span>
+                      {credit.requiresAttribution ? <Badge variant="secondary">{t("creditsRequired")}</Badge> : null}
+                    </div>
+                    <p className="mt-1 break-words text-muted-foreground">{credit.attributionText}</p>
+                    <div className="mt-1 flex gap-3">
+                      <a href={credit.sourceUrl} target="_blank" rel="noreferrer" className="text-primary underline underline-offset-2">{t("creditsSource")}</a>
+                      {credit.licenseUrl ? <a href={credit.licenseUrl} target="_blank" rel="noreferrer" className="text-primary underline underline-offset-2">{t("creditsLicense")}</a> : null}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="mt-3 text-xs text-muted-foreground">{t("creditsNone")}</p>
+            )}
           </CardContent>
         </Card>
 
@@ -730,6 +847,26 @@ export default function ExportPage() {
                         <Badge key={i} variant="secondary" className="text-xs">{h}</Badge>
                       ))}
                     </div>
+                    {displayLocal && <p className="mt-1.5 text-[11px] text-muted-foreground">{displayLocal.tagHint}</p>}
+                  </div>
+                )}
+                {displayLocal && (
+                  <div className="rounded-lg border border-primary/30 bg-primary/5 p-3">
+                    <div className="flex items-center gap-1.5">
+                      <LuMapPin className="size-3.5 text-primary" />
+                      <p className="text-xs font-semibold">同城发布清单</p>
+                    </div>
+                    <p className="mt-1 text-[11px] text-muted-foreground">{displayLocal.anchorNote}</p>
+                    <ul className="mt-2 space-y-1.5">
+                      {displayLocal.poiChecklist.map((item, i) => (
+                        <li key={i} className="flex items-start gap-2 text-xs text-foreground/90">
+                          <span className="mt-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-primary/15 text-[10px] font-semibold text-primary">
+                            {i + 1}
+                          </span>
+                          <span>{item}</span>
+                        </li>
+                      ))}
+                    </ul>
                   </div>
                 )}
                 {displayPublish.caption && (
@@ -753,8 +890,15 @@ export default function ExportPage() {
           </CardContent>
         </Card>
 
-        <details className="hidden">
-          <summary className="cursor-pointer list-none rounded-lg border border-border/60 bg-muted/20 px-4 py-2 text-sm font-medium text-muted-foreground transition hover:text-foreground">
+        {/* 发布前诊断：多维内容诊断分 + 相对预测（方向判断，不猜播放量），发布前给老板一次修改机会 */}
+        <div className="mb-6">
+          <PrePublishDiagnosis projectId={id} />
+        </div>
+
+        {/* 高级工具折叠区：多平台比例导出 / 效果回流录入 / A/B 变体等。
+            此前被 className="hidden" 整体藏掉，导致效果回流永远无入口、"数据优先"推荐永远无数据可依 */}
+        <details className="mb-6">
+          <summary className="cursor-pointer rounded-lg border border-border/60 bg-muted/20 px-4 py-2 text-sm font-medium text-muted-foreground transition hover:text-foreground">
             {t("advancedTools")}
           </summary>
           <div className="mt-4">
@@ -807,9 +951,14 @@ export default function ExportPage() {
           </CardContent>
         </Card>
 
-        {/* 效果回流：发布后回填数据 → 学出哪种风格更能卖 */}
+        {/* 效果回流：发布后回填数据 → 学出哪种风格更能卖；带已发布时间做回填提醒 */}
         <div className="mb-6">
-          <PerformanceFeedback projectId={id} />
+          <PerformanceFeedback projectId={id} publishedAt={publishedVideos[id]?.publishedAt ?? null} />
+        </div>
+
+        {/* 单条复盘：数据回填后一键复盘，"下条试试"自动写进店铺记忆反哺下次生成 */}
+        <div className="mb-6">
+          <VideoRetro projectId={id} />
         </div>
 
         {/* A/B 变体：换字幕风格+配乐各重渲一条，投放对比哪个转化高 */}

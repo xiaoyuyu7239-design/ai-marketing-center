@@ -1,4 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
+import { isAdminOrDesktopRequest } from "@server/admin/admin-auth";
+import { safeFetch } from "@backend/shared/ssrf-guard";
+import { AUTHENTICATED_IP_RATE_LIMIT_PRESETS, consumeAuthenticatedIpRateLimit, rateLimitResponse } from "@backend/core/security/rate-limit";
 
 /**
  * 服务端测试 LLM 连接。
@@ -7,24 +10,18 @@ import { NextRequest, NextResponse } from "next/server";
  * 注意：只测 /models 会把“Key 可用但当前模型/推理接入点不可用”误判为成功。
  * 因此这里直接用当前 model 发一次极小的 OpenAI-compatible chat 请求，和脚本生成路径保持一致。
  */
-function arkEndpointHint(baseUrl: string, errorText: string) {
+function arkEndpointHint(baseUrl: string, status: number) {
   if (!/ark\.cn-.*volces\.com|volces\.com\/api\/v3/i.test(baseUrl)) return "";
-  if (!/InvalidEndpointOrModel|endpoint|model|not found|not exist|404/i.test(errorText)) return "";
+  if (![400, 404, 422].includes(status)) return "";
   return "。火山方舟的 model 字段通常要填写控制台创建的「推理接入点 ID」（一般以 ep- 开头），不是模型展示名；请把文本模型/视觉模型改成你的接入点 ID。";
 }
 
-async function readProviderError(resp: Response) {
-  const text = await resp.text().catch(() => "");
-  if (!text) return `${resp.status} ${resp.statusText}`;
-  try {
-    const data = JSON.parse(text) as { error?: { message?: string }; message?: string };
-    return data.error?.message || data.message || text.slice(0, 500);
-  } catch {
-    return text.slice(0, 500);
-  }
-}
-
 export async function POST(req: NextRequest) {
+  if (!isAdminOrDesktopRequest(req)) {
+    return NextResponse.json({ ok: false, error: "无权访问" }, { status: 403 });
+  }
+  const limit = consumeAuthenticatedIpRateLimit(req, "llm:test", AUTHENTICATED_IP_RATE_LIMIT_PRESETS.providerProbe);
+  if (!limit.allowed) return rateLimitResponse(limit, "模型连接测试过于频繁，请稍后再试");
   try {
     const { baseUrl, apiKey, model } = await req.json();
     if (!baseUrl || !apiKey || !model) {
@@ -32,17 +29,13 @@ export async function POST(req: NextRequest) {
     }
 
     const cleanBase = String(baseUrl).replace(/\/$/, "");
+    const parsedBase = new URL(cleanBase);
+    if (parsedBase.protocol !== "https:" || parsedBase.username || parsedBase.password) {
+      return NextResponse.json({ ok: false, error: "模型地址必须是无内嵌凭据的 HTTPS URL" }, { status: 400 });
+    }
     const cleanModel = String(model).trim();
     const url = `${cleanBase}/chat/completions`;
-    const controller = new AbortController();
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<"timeout">((resolve) => {
-      timer = setTimeout(() => {
-        controller.abort();
-        resolve("timeout");
-      }, 8000);
-    });
-    const request = fetch(url, {
+    const resp = await safeFetch(url, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${apiKey}`,
@@ -54,34 +47,27 @@ export async function POST(req: NextRequest) {
         temperature: 0,
         max_tokens: 1,
       }),
-      signal: controller.signal,
-    }).catch((e) => {
-      if (e instanceof Error && e.name === "AbortError") return "timeout" as const;
-      throw e;
+      signal: AbortSignal.timeout(8000),
+    }, 0, {
+      allowedProtocols: ["https:"],
+      allowedHosts: [parsedBase.hostname],
+      allowedPorts: [parsedBase.port],
     });
-    const result = await Promise.race([request, timeout]);
-    if (timer) clearTimeout(timer);
-    if (result === "timeout") {
-      return NextResponse.json({
-        ok: false,
-        error: "连接测试超时：服务端 8 秒内没有响应，请稍后重试或检查 Ark 接入点/网络。",
-      });
-    }
-    const resp = result;
 
     if (resp.ok) {
+      await resp.body?.cancel("provider-probe-complete").catch(() => undefined);
       return NextResponse.json({ ok: true });
     }
-    const text = await readProviderError(resp);
+    await resp.body?.cancel("provider-probe-error").catch(() => undefined);
     return NextResponse.json({
       ok: false,
       status: resp.status,
-      error: `${resp.status} ${resp.statusText}${text ? ` - ${text}` : ""}${arkEndpointHint(cleanBase, text)}`,
+      error: `供应商返回 HTTP ${resp.status}${arkEndpointHint(cleanBase, resp.status)}`,
     });
-  } catch (error) {
+  } catch {
     return NextResponse.json({
       ok: false,
-      error: error instanceof Error ? error.message : "连接失败",
+      error: "连接测试失败，请检查模型地址、网络和证书配置",
     });
   }
 }

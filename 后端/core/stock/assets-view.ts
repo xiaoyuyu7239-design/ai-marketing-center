@@ -10,14 +10,26 @@ export interface AssetItem {
   duration: number;
   description: string;
   prompt: string;
+  /** 脚本里的运镜描述（中文）；图生视频时与 description 拼成运动指令 */
+  camera?: string;
   visualSource: Shot["visualSource"];
   status: "pending" | "generating" | "done" | "failed";
   thumbnailUrl?: string;
   error?: string;
+  /** 转动态被平台人脸风控拦截：不再计入可转动态、不再重试，卡片上明确标注（仅前端状态，不落库） */
+  motionBlocked?: boolean;
   /** 素材是否为视频（已转动态镜头/图生视频） */
   isVideo?: boolean;
   /** 已落库素材的真实类型（如 stock_footage 表示免费素材库自动配的画面） */
   assetType?: string;
+  /** 已落库素材的唯一 ID；动态资格会将它与文件 hash 一起绑定。 */
+  assetId?: string;
+  /** 真实素材文件，与可能只是预览图的 thumbnailUrl 分开。 */
+  assetFileUrl?: string;
+  assetProvider?: string;
+  assetModel?: string;
+  /** 当前落库素材的生成 prompt，与脚本分镜 prompt 分开，用于识别已执行的安全重生标记。 */
+  assetPrompt?: string;
 }
 
 /** 视频素材文件后缀（用于区分视频 vs 静态图，决定缩略图与「转动态」入口） */
@@ -25,12 +37,64 @@ const VIDEO_EXT = /\.(mp4|webm|mov|m4v)$/i;
 
 /** GET /api/project/[id]/assets 返回行里本函数关心的子集 */
 export interface SavedAssetRow {
+  id?: string | null;
   shotId: number;
   filePath?: string | null;
   status?: string | null;
   type?: string | null;
   /** 视频素材的静态预览图（免费素材视频会落此列）；用作 <img> 缩略图，避免拿 mp4 当图渲染 */
   thumbnailPath?: string | null;
+  provider?: string | null;
+  model?: string | null;
+  prompt?: string | null;
+  /** API 会返回 ISO 时间字符串；纯函数也接受 DB Date/数字便于复用与测试。 */
+  createdAt?: Date | string | number | null;
+  /** SQLite 插入顺序；解决 timestamp 只到秒时 UUID 无法表示新旧的问题。 */
+  revisionOrder?: number | null;
+}
+
+function createdAtMillis(value: SavedAssetRow["createdAt"]): number {
+  if (value instanceof Date) return value.getTime();
+  if (typeof value === "number") return Number.isFinite(value) ? value : Number.NEGATIVE_INFINITY;
+  if (typeof value === "string") {
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
+  }
+  return Number.NEGATIVE_INFINITY;
+}
+
+/**
+ * 历史素材中每个分镜只选最新的已完成版本。
+ * 有 revisionOrder 时以真实插入顺序定新旧；旧 API 数据才回退 createdAt/id。
+ */
+export function newestDoneAssetsByShot(
+  savedAssets: SavedAssetRow[],
+): Map<number, SavedAssetRow> {
+  const ordered = [...savedAssets].sort((left, right) => {
+    const leftRevision = typeof left.revisionOrder === "number" ? left.revisionOrder : null;
+    const rightRevision = typeof right.revisionOrder === "number" ? right.revisionOrder : null;
+    if (leftRevision != null && rightRevision != null && leftRevision !== rightRevision) {
+      return rightRevision - leftRevision;
+    }
+    const leftCreatedAt = createdAtMillis(left.createdAt);
+    const rightCreatedAt = createdAtMillis(right.createdAt);
+    if (leftCreatedAt !== rightCreatedAt) return rightCreatedAt > leftCreatedAt ? 1 : -1;
+    const leftId = left.id ?? "";
+    const rightId = right.id ?? "";
+    return rightId === leftId ? 0 : rightId > leftId ? 1 : -1;
+  });
+  const result = new Map<number, SavedAssetRow>();
+  for (const asset of ordered) {
+    if (
+      asset &&
+      asset.filePath &&
+      asset.status === "done" &&
+      !result.has(asset.shotId)
+    ) {
+      result.set(asset.shotId, asset);
+    }
+  }
+  return result;
 }
 
 /**
@@ -45,11 +109,8 @@ export function buildAssetRows(
   savedAssets: SavedAssetRow[],
   productImages: string[],
 ): AssetItem[] {
-  // 已落库且就绪的素材按 shotId 索引
-  const savedByShot = new Map<number, SavedAssetRow>();
-  for (const a of savedAssets) {
-    if (a && a.filePath && a.status === "done") savedByShot.set(a.shotId, a);
-  }
+  // API 保留历史版本；视图对每个分镜只展示最新的已完成素材。
+  const savedByShot = newestDoneAssetsByShot(savedAssets);
   const firstProduct = productImages[0];
 
   return shots.map((s) => {
@@ -63,11 +124,17 @@ export function buildAssetRows(
         duration: s.duration,
         description: s.description,
         prompt: s.prompt ?? "",
+        camera: s.camera,
         visualSource: s.visualSource,
         status: "done" as const,
         thumbnailUrl: isVideo && saved.thumbnailPath ? saved.thumbnailPath : saved.filePath,
         isVideo: isVideo || undefined,
         assetType: saved.type ?? undefined,
+        assetId: saved.id ?? undefined,
+        assetFileUrl: saved.filePath,
+        assetProvider: saved.provider ?? undefined,
+        assetModel: saved.model ?? undefined,
+        assetPrompt: saved.prompt ?? undefined,
       };
     }
     return {
@@ -76,9 +143,11 @@ export function buildAssetRows(
       duration: s.duration,
       description: s.description,
       prompt: s.prompt ?? "",
+      camera: s.camera,
       visualSource: s.visualSource,
       status: s.visualSource === "product_image" ? ("done" as const) : ("pending" as const),
       thumbnailUrl: s.visualSource === "product_image" ? firstProduct : undefined,
+      assetFileUrl: s.visualSource === "product_image" ? firstProduct : undefined,
     };
   });
 }

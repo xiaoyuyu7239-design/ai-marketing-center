@@ -1,13 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
 import { generateSpeechFree, FREE_TTS_VOICES, DEFAULT_FREE_VOICE } from "@backend/core/media/edge-tts";
+import { requireMerchant } from "@backend/core/auth/require-merchant";
+import { consumeExpensiveRouteRateLimit, EXPENSIVE_RATE_LIMIT_PRESETS, rateLimitResponse } from "@backend/core/security/rate-limit";
 
 // GET /api/tts/free —— 列出可用的免费音色（无需任何 Key）
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const auth = await requireMerchant(req);
+  if ("error" in auth) return auth.error;
   return NextResponse.json({ voices: FREE_TTS_VOICES, default: DEFAULT_FREE_VOICE });
 }
 
 // POST /api/tts/free —— 试听：用微软 Edge keyless TTS 合成一小段语音，直接返回 mp3
 export async function POST(req: NextRequest) {
+  const auth = await requireMerchant(req);
+  if ("error" in auth) return auth.error;
+  const limit = consumeExpensiveRouteRateLimit(req, auth.merchant.id, "tts:free", EXPENSIVE_RATE_LIMIT_PRESETS.auxiliaryModel);
+  if (!limit.allowed) return rateLimitResponse(limit, "试听过于频繁，请稍后再试");
   let body: Record<string, unknown> = {};
   try {
     body = await req.json();

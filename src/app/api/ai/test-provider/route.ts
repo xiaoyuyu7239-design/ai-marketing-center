@@ -1,4 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
+import { isAdminOrDesktopRequest } from "@server/admin/admin-auth";
+import { safeFetch } from "@backend/shared/ssrf-guard";
+import { AUTHENTICATED_IP_RATE_LIMIT_PRESETS, consumeAuthenticatedIpRateLimit, rateLimitResponse } from "@backend/core/security/rate-limit";
 
 /**
  * AI 平台 Key 连通性校验（生图/生视频平台）。
@@ -42,6 +45,11 @@ function buildProbe(name: string, apiKey: string, baseUrl?: string): Probe {
 }
 
 export async function POST(req: NextRequest) {
+  if (!isAdminOrDesktopRequest(req)) {
+    return NextResponse.json({ status: "unknown", message: "无权访问" }, { status: 403 });
+  }
+  const limit = consumeAuthenticatedIpRateLimit(req, "ai:test-provider", AUTHENTICATED_IP_RATE_LIMIT_PRESETS.providerProbe);
+  if (!limit.allowed) return rateLimitResponse(limit, "供应商连接测试过于频繁，请稍后再试");
   let body: { name?: string; apiKey?: string; baseUrl?: string } = {};
   try {
     body = await req.json();
@@ -57,14 +65,30 @@ export async function POST(req: NextRequest) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 10000);
   try {
-    const r = await fetch(probe.url, { method: "GET", headers: probe.headers, signal: controller.signal });
+    const parsed = new URL(probe.url);
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password) {
+      return NextResponse.json({ status: "unknown", message: "模型地址必须是无内嵌凭据的 HTTPS URL" }, { status: 400 });
+    }
+    const r = await safeFetch(
+      probe.url,
+      { method: "GET", headers: probe.headers, signal: controller.signal },
+      0,
+      {
+        allowedProtocols: ["https:"],
+        allowedHosts: [parsed.hostname],
+        allowedPorts: [parsed.port],
+      },
+    );
     if (r.status === 401 || r.status === 403) {
+      await r.body?.cancel("provider-probe-invalid").catch(() => undefined);
       return NextResponse.json({ status: "invalid", message: "Key 无效或无权限" });
     }
     if (r.ok || probe.authFirst) {
       // authFirst 平台：非 401/403 即视为鉴权通过
+      await r.body?.cancel("provider-probe-complete").catch(() => undefined);
       return NextResponse.json({ status: "ok", message: "连接正常" });
     }
+    await r.body?.cancel("provider-probe-unknown").catch(() => undefined);
     return NextResponse.json({ status: "unknown", message: `无法判定（HTTP ${r.status}），可直接试生成` });
   } catch (e) {
     const aborted = e instanceof Error && e.name === "AbortError";

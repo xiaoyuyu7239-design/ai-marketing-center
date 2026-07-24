@@ -57,7 +57,7 @@ export function AdminLogin({ defaultPassword }: { defaultPassword: boolean }) {
           />
           {defaultPassword ? (
             <p className="mt-2 text-xs text-amber-400">
-              当前未设置环境变量，开发默认口令为 clipforge-admin。
+              当前为本地开发配置；生产部署必须设置独立强口令和会话密钥。
             </p>
           ) : null}
           {error ? <p className="mt-2 text-xs text-destructive">{error}</p> : null}
@@ -70,4 +70,3 @@ export function AdminLogin({ defaultPassword }: { defaultPassword: boolean }) {
     </main>
   );
 }
-

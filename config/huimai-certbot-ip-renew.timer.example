@@ -1,0 +1,11 @@
+[Unit]
+Description=Renew Huimai public-IP certificate four times daily
+
+[Timer]
+OnCalendar=*-*-* 00,06,12,18:17:00
+RandomizedDelaySec=15m
+Persistent=true
+Unit=huimai-certbot-ip-renew.service
+
+[Install]
+WantedBy=timers.target
