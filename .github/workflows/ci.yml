@@ -37,6 +37,18 @@ jobs:
       - name: 安装依赖（锁定版本，开箱即用）
         run: pnpm install --frozen-lockfile
 
+      - name: 配置并验证锁定版本的媒体二进制
+        shell: bash
+        run: |
+          FFMPEG_PATH="$(node -e 'process.stdout.write(require("ffmpeg-static"))')"
+          FFPROBE_PATH="$(node -e 'process.stdout.write(require("@ffprobe-installer/ffprobe").path)')"
+          chmod u+x "$FFMPEG_PATH" "$FFPROBE_PATH"
+          test -x "$FFMPEG_PATH"
+          test -x "$FFPROBE_PATH"
+          "$FFMPEG_PATH" -version
+          "$FFPROBE_PATH" -version
+          printf '%s\n' "FFMPEG_PATH=$FFMPEG_PATH" "FFPROBE_PATH=$FFPROBE_PATH" >> "$GITHUB_ENV"
+
       - name: 代码规范检查
         run: pnpm lint
 
