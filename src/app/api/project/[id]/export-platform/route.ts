@@ -9,6 +9,8 @@ import { getDb } from "@backend/db";
 import { compositions } from "@backend/db/schema";
 import { eq, desc } from "drizzle-orm";
 import { PLATFORM_SPECS } from "@backend/core/publish/platform-specs";
+import { requireMerchant, requireOwnedProject } from "@backend/core/auth/require-merchant";
+import { consumeExpensiveRouteRateLimit, EXPENSIVE_RATE_LIMIT_PRESETS, rateLimitResponse } from "@backend/core/security/rate-limit";
 
 const execAsync = promisify(exec);
 
@@ -24,11 +26,17 @@ export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const auth = await requireMerchant(req);
+  if ("error" in auth) return auth.error;
+  const limit = consumeExpensiveRouteRateLimit(req, auth.merchant.id, "project:export-platform", EXPENSIVE_RATE_LIMIT_PRESETS.cpu);
+  if (!limit.allowed) return rateLimitResponse(limit, "平台视频导出过于频繁，请稍后再试");
   try {
     const { id } = await params;
     if (!/^[a-zA-Z0-9-]+$/.test(id)) {
       return NextResponse.json({ error: "无效的项目ID" }, { status: 400 });
     }
+    const owned = await requireOwnedProject(auth.merchant.id, id);
+    if ("error" in owned) return owned.error;
     const { platform } = await req.json();
     const target = PLATFORM_SIZE[platform];
     if (!target) {

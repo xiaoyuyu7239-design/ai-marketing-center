@@ -70,4 +70,3 @@ export function AdminLogin({ defaultPassword }: { defaultPassword: boolean }) {
     </main>
   );
 }
-

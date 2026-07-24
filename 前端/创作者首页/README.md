@@ -1,6 +1,6 @@
 # 创作者首页
 
-**路由**: `/start`  
+**路由**: `/start`
 **文件**: `src/app/start/page.tsx` → `前端/创作者首页/page.tsx`
 
 ## 功能
@@ -15,4 +15,3 @@
 
 ## 添加新功能
 在 `page.tsx` 中的 `cf-wrap` 内添加新的 section
-

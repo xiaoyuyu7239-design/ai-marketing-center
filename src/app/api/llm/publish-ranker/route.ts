@@ -1,11 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
-import OpenAI from "openai";
+import { eq } from "drizzle-orm";
+import { createSafeOpenAIClient } from "@backend/shared/openai-client";
 import { getDb } from "@backend/db";
-import { publishMetrics } from "@backend/db/schema";
+import { publishMetrics, publishRecords, projects as projectsTable } from "@backend/db/schema";
+import { requireMerchant } from "@backend/core/auth/require-merchant";
+import {
+  consumeExpensiveRouteRateLimit,
+  EXPENSIVE_RATE_LIMIT_PRESETS,
+  rateLimitResponse,
+} from "@backend/core/security/rate-limit";
 import { runAgentOperation } from "@backend/core/agent/agent-strategy";
 import { extractJSON } from "@backend/script-engine/generator";
 import {
-  coerceGenerationProjects,
   getApprovedProjects,
   projectCover,
   projectTitle,
@@ -15,8 +21,6 @@ import {
   type PublishedRecords,
 } from "@frontend/lib/generation-records";
 import type { PublishPickStrategy } from "@frontend/stores/video-approval-store";
-
-type MetricRow = typeof publishMetrics.$inferSelect;
 
 interface MetricSummary {
   records: number;
@@ -69,40 +73,49 @@ function parseStrategy(value: unknown): PublishPickStrategy {
   return "balanced";
 }
 
-function coerceApprovalRecords(value: unknown): ApprovalRecords {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  return Object.fromEntries(
-    Object.entries(value as Record<string, unknown>).flatMap(([key, record]) => {
-      if (!record || typeof record !== "object" || Array.isArray(record)) return [];
-      const approvedAt = (record as { approvedAt?: unknown }).approvedAt;
-      if (typeof approvedAt !== "string" || !approvedAt) return [];
-      const projectId = (record as { projectId?: unknown }).projectId;
-      return [[key, { projectId: typeof projectId === "string" ? projectId : key, approvedAt }]];
+/** 从 DB 读当前商家的项目 + 入库/发布状态（服务端权威数据，不信任客户端传入的列表） */
+async function loadMerchantPublishState(merchantId: string): Promise<{
+  projects: GenerationProject[];
+  approved: ApprovalRecords;
+  published: PublishedRecords;
+}> {
+  const db = getDb();
+  const projectRows = await db
+    .select({
+      id: projectsTable.id,
+      name: projectsTable.name,
+      status: projectsTable.status,
+      productName: projectsTable.productName,
+      productCategory: projectsTable.productCategory,
+      productDescription: projectsTable.productDescription,
+      productImages: projectsTable.productImages,
+      createdAt: projectsTable.createdAt,
+      updatedAt: projectsTable.updatedAt,
     })
-  );
-}
+    .from(projectsTable)
+    .where(eq(projectsTable.merchantId, merchantId));
+  const recordRows = await db
+    .select()
+    .from(publishRecords)
+    .where(eq(publishRecords.merchantId, merchantId));
 
-function coercePublishedRecords(value: unknown): PublishedRecords {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  return Object.fromEntries(
-    Object.entries(value as Record<string, unknown>).flatMap(([key, record]) => {
-      if (!record || typeof record !== "object" || Array.isArray(record)) return [];
-      const publishedAt = (record as { publishedAt?: unknown }).publishedAt;
-      if (typeof publishedAt !== "string" || !publishedAt) return [];
-      const projectId = (record as { projectId?: unknown }).projectId;
-      const platform = (record as { platform?: unknown }).platform;
-      return [
-        [
-          key,
-          {
-            projectId: typeof projectId === "string" ? projectId : key,
-            publishedAt,
-            platform: typeof platform === "string" ? platform : undefined,
-          },
-        ],
-      ];
-    })
-  );
+  const approved: ApprovalRecords = {};
+  const published: PublishedRecords = {};
+  for (const r of recordRows) {
+    // rejected 的内容既不进候选也不算已发（口径与商家端 store / 后台统计统一）
+    if (r.reviewStatus === "rejected") continue;
+    if (r.approvedAt) {
+      approved[r.projectId] = { projectId: r.projectId, approvedAt: r.approvedAt.toISOString() };
+    }
+    if (r.publishedAt) {
+      published[r.projectId] = {
+        projectId: r.projectId,
+        publishedAt: r.publishedAt.toISOString(),
+        platform: r.platform ?? undefined,
+      };
+    }
+  }
+  return { projects: projectRows as GenerationProject[], approved, published };
 }
 
 function truncateText(value: string | null | undefined, length: number) {
@@ -110,10 +123,27 @@ function truncateText(value: string | null | undefined, length: number) {
   return text.length > length ? `${text.slice(0, length)}...` : text;
 }
 
-async function loadPublishingData() {
+// 只按当前商家自己的项目聚合投放数据，避免跨商家数据混算影响择优推荐
+async function loadPublishingData(merchantId: string) {
   try {
-    const rows = await getDb().select().from(publishMetrics);
-    const metricMap = rows.reduce<Record<string, MetricSummary>>((acc, row: MetricRow) => {
+    const rows = await getDb()
+      .select({
+        projectId: publishMetrics.projectId,
+        style: publishMetrics.style,
+        hookId: publishMetrics.hookId,
+        category: publishMetrics.category,
+        platform: publishMetrics.platform,
+        views: publishMetrics.views,
+        likes: publishMetrics.likes,
+        comments: publishMetrics.comments,
+        shares: publishMetrics.shares,
+        orders: publishMetrics.orders,
+        publishedAt: publishMetrics.publishedAt,
+      })
+      .from(publishMetrics)
+      .innerJoin(projectsTable, eq(publishMetrics.projectId, projectsTable.id))
+      .where(eq(projectsTable.merchantId, merchantId));
+    const metricMap = rows.reduce<Record<string, MetricSummary>>((acc, row) => {
       const current = acc[row.projectId] ?? { ...emptyMetricSummary };
       const views = Number(row.views ?? 0);
       const likes = Number(row.likes ?? 0);
@@ -137,7 +167,7 @@ async function loadPublishingData() {
     }, {});
     const now = Date.now();
     const history = rows.reduce<PublishHistorySummary>(
-      (acc, row: MetricRow) => {
+      (acc, row) => {
         if (!row.publishedAt) return acc;
         const publishedMs = row.publishedAt instanceof Date ? row.publishedAt.getTime() : new Date(row.publishedAt).getTime();
         if (!Number.isFinite(publishedMs)) return acc;
@@ -300,6 +330,10 @@ function mergeLlmItems(
 }
 
 export async function POST(req: NextRequest) {
+  const auth = await requireMerchant(req);
+  if ("error" in auth) return auth.error;
+  const limit = consumeExpensiveRouteRateLimit(req, auth.merchant.id, "llm:publish-ranker", EXPENSIVE_RATE_LIMIT_PRESETS.auxiliaryModel);
+  if (!limit.allowed) return rateLimitResponse(limit, "发布排序请求过于频繁，请稍后再试");
   let body: Record<string, unknown> = {};
   try {
     body = await req.json();
@@ -307,12 +341,11 @@ export async function POST(req: NextRequest) {
     body = {};
   }
 
-  const projects = coerceGenerationProjects(body.projects);
-  const approved = coerceApprovalRecords(body.approved);
-  const published = coercePublishedRecords(body.published);
+  // 项目与入库/发布状态一律以服务端为准（客户端 body 里即使还传了这些字段也忽略）
+  const { projects, approved, published } = await loadMerchantPublishState(auth.merchant.id);
   const count = clampCount(body.count);
   const strategy = parseStrategy(body.strategy);
-  const { metricMap, history } = await loadPublishingData();
+  const { metricMap, history } = await loadPublishingData(auth.merchant.id);
   const pool = buildCandidatePool(projects, approved, published, metricMap, history, strategy);
 
   if (pool.length === 0) {
@@ -322,8 +355,10 @@ export async function POST(req: NextRequest) {
   const fallback = mergeLlmItems({ items: [] }, pool, count, "rule", strategy);
 
   try {
+    // 发布择优是页面打开即自动触发的辅助能力，且有规则兜底——不计入商家生成配额
+    // （否则试用套餐的次数会被"打开页面"悄悄耗光）；仍需登录，平台侧成本由 max_tokens 上限控制
     const parsed = await runAgentOperation("publish-ranker", "today-publish-rank", async (config, systemPrompt) => {
-      const client = new OpenAI({ baseURL: config.baseUrl, apiKey: config.apiKey || "no-key" });
+      const client = createSafeOpenAIClient({ baseURL: config.baseUrl, apiKey: config.apiKey || "no-key" });
       const response = await client.chat.completions.create({
         model: config.model,
         messages: [

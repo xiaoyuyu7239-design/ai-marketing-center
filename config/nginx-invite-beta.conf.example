@@ -1,0 +1,62 @@
+# 绘卖 AI 邀请内测反向代理基线。此文件放入 nginx.conf 的 http{}；同时安装 nginx-huimai-proxy.inc.example。
+# 最大业务请求仅在 materials 上传路由放宽到 161 MiB，其余入口默认 2 MiB，防止匿名大 body 落满临时盘。
+limit_conn_zone $binary_remote_addr zone=huimai_upload_conn:10m;
+limit_req_zone $binary_remote_addr zone=huimai_upload_rate:10m rate=20r/m;
+
+upstream huimai_app {
+    server 127.0.0.1:3000;
+    keepalive 32;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name replace-with-production-host;
+
+    ssl_certificate /etc/letsencrypt/live/replace-with-production-host/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/replace-with-production-host/privkey.pem;
+
+    client_max_body_size 2m;
+    client_body_buffer_size 256k;
+    client_body_timeout 30s;
+    # 必须放在独立受配额/监控的文件系统；邀请内测建议硬配额至少 4 GiB、80% 告警。
+    client_body_temp_path /var/lib/nginx/huimai-body 1 2;
+
+    location = /api/upload {
+        client_max_body_size 81m;
+        limit_conn huimai_upload_conn 4;
+        limit_req zone=huimai_upload_rate burst=10 nodelay;
+        include /etc/nginx/snippets/huimai-proxy.inc;
+    }
+
+    location = /api/products/upload {
+        client_max_body_size 81m;
+        limit_conn huimai_upload_conn 4;
+        limit_req zone=huimai_upload_rate burst=10 nodelay;
+        include /etc/nginx/snippets/huimai-proxy.inc;
+    }
+
+    location ~ ^/api/project/[a-zA-Z0-9-]+/bgm$ {
+        client_max_body_size 21m;
+        limit_conn huimai_upload_conn 4;
+        limit_req zone=huimai_upload_rate burst=10 nodelay;
+        include /etc/nginx/snippets/huimai-proxy.inc;
+    }
+
+    location ~ ^/api/project/[a-zA-Z0-9-]+/materials$ {
+        # Nginx 完整接收并校验 body 后才交给应用，chunked 同样受硬上限约束。
+        client_max_body_size 161m;
+        limit_conn huimai_upload_conn 4;
+        limit_req zone=huimai_upload_rate burst=10 nodelay;
+        include /etc/nginx/snippets/huimai-proxy.inc;
+    }
+
+    location / {
+        include /etc/nginx/snippets/huimai-proxy.inc;
+    }
+}
+
+server {
+    listen 80;
+    server_name replace-with-production-host;
+    return 301 https://$host$request_uri;
+}

@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb } from "@backend/db";
 import { projects } from "@backend/db/schema";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
+import { requireMerchant } from "@backend/core/auth/require-merchant";
 
 // 允许通过 PATCH 更新的字段白名单（禁止透传 id/createdAt 等，防止字段注入/主键破坏）
 const PATCHABLE_FIELDS = [
@@ -36,13 +37,18 @@ const VALID_STATUS = new Set([
 
 // 获取单个项目
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const auth = await requireMerchant(req);
+  if ("error" in auth) return auth.error;
   try {
     const { id } = await params;
     const db = getDb();
-    const result = await db.select().from(projects).where(eq(projects.id, id));
+    const result = await db
+      .select()
+      .from(projects)
+      .where(and(eq(projects.id, id), eq(projects.merchantId, auth.merchant.id)));
 
     if (result.length === 0) {
       return NextResponse.json({ error: "项目不存在" }, { status: 404 });
@@ -63,6 +69,8 @@ export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const auth = await requireMerchant(req);
+  if ("error" in auth) return auth.error;
   try {
     const { id } = await params;
     const body = await req.json();
@@ -88,7 +96,7 @@ export async function PATCH(
     const result = await db
       .update(projects)
       .set({ ...updates, updatedAt: new Date() })
-      .where(eq(projects.id, id))
+      .where(and(eq(projects.id, id), eq(projects.merchantId, auth.merchant.id)))
       .returning();
 
     if (result.length === 0) {
@@ -107,13 +115,15 @@ export async function PATCH(
 
 // 删除项目
 export async function DELETE(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const auth = await requireMerchant(req);
+  if ("error" in auth) return auth.error;
   try {
     const { id } = await params;
     const db = getDb();
-    await db.delete(projects).where(eq(projects.id, id));
+    await db.delete(projects).where(and(eq(projects.id, id), eq(projects.merchantId, auth.merchant.id)));
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error("删除项目失败:", error);

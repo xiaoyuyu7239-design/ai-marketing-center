@@ -1,0 +1,44 @@
+# v0.9 邀请内测候选提交的工作树覆盖白名单。目录必须以 / 结尾。
+# 隔离候选从当前 HEAD 的干净 clone 开始：这些路径会被当前工作树精确覆盖，
+# 未列出的已跟踪 HEAD 文件保持不变；未列出的未跟踪文件绝不复制。
+.dockerignore
+.github/workflows/
+.gitignore
+Dockerfile
+LICENSE
+NOTICE
+README.en.md
+README.md
+bin/
+components.json
+config/
+docs/
+drizzle/
+drizzle.config.ts
+e2e/
+electron/
+eslint.config.mjs
+mcp/
+next-env.d.ts
+next.config.ts
+package.json
+pnpm-lock.yaml
+pnpm-workspace.yaml
+postcss.config.mjs
+public/
+scripts/
+skills/
+src/
+tailwind.config.js
+tools/matting/
+tsconfig.json
+vitest.config.ts
+产品文档/README.md
+产品文档/14_邀请内测上线执行清单.md
+产品文档/15_模型评测与选型方案.md
+产品文档/16_备份恢复演练记录_2026-07-16.md
+产品文档/17_邀请内测放行报告_2026-07-16.md
+产品文档/邀请内测上线运行手册.md
+前端/
+后端/
+服务器/

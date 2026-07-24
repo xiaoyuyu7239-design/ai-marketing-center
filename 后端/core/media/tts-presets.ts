@@ -1,12 +1,12 @@
 /**
  * 付费 TTS 平台预设（纯数据，前后端通用，不含任何 server-only 依赖）。
  *
- * 统一一个「平台」下拉切换：OpenAI 兼容 / Atlas Cloud / MiniMax / fal.ai。
+ * 统一一个「平台」下拉切换：豆包语音 / OpenAI 兼容 / Atlas Cloud / MiniMax / fal.ai。
  * Atlas、fal 的 Key 复用「AI 平台」tab 已填的同名 provider Key；MiniMax 单独填 Key（+可选 GroupId）。
  * 每个平台预置默认 baseUrl/模型/音色，UI 据此条件渲染字段、做音色建议。
  */
 
-export type TTSProvider = "openai" | "atlas" | "minimax" | "falai";
+export type TTSProvider = "volcengine" | "openai" | "atlas" | "minimax" | "falai";
 
 export interface TTSVoiceOption {
   value: string;
@@ -28,7 +28,7 @@ export interface TTSProviderMeta {
   voices: TTSVoiceOption[];
   /**
    * Key 来源：
-   * - "tts"：用 TTS 配置自带的 apiKey（OpenAI 兼容 / MiniMax）
+   * - "tts"：用 TTS 配置自带的 apiKey（豆包语音 / OpenAI 兼容 / MiniMax）
    * - 其它：复用「AI 平台」store 里对应 provider 的 apiKey（atlas-cloud / fal-ai）
    */
   keySource: "tts" | "atlas-cloud" | "fal-ai";
@@ -44,10 +44,22 @@ export interface TTSProviderMeta {
 export const OPENAI_TTS_PRESETS = [
   { label: "硅基流动 CosyVoice", baseUrl: "https://api.siliconflow.cn/v1", model: "FunAudioLLM/CosyVoice2-0.5B", voice: "FunAudioLLM/CosyVoice2-0.5B:alex" },
   { label: "OpenAI tts-1", baseUrl: "https://api.openai.com/v1", model: "tts-1", voice: "alloy" },
-  { label: "火山方舟", baseUrl: "https://ark.cn-beijing.volces.com/api/v3", model: "doubao-tts", voice: "zh_female_cancan" },
 ];
 
 export const TTS_PROVIDERS: TTSProviderMeta[] = [
+  {
+    value: "volcengine",
+    label: "火山引擎豆包语音 2.0",
+    baseUrl: "https://openspeech.bytedance.com/api/v3/tts",
+    defaultModel: "seed-tts-2.0",
+    models: [{ value: "seed-tts-2.0", label: "豆包语音合成大模型 2.0" }],
+    defaultVoice: "zh_female_vv_uranus_bigtts",
+    voices: [
+      { value: "zh_female_vv_uranus_bigtts", label: "Vivi 2.0 · 女声（默认）" },
+    ],
+    keySource: "tts",
+    hint: "使用豆包语音新版控制台的独立 API Key；不能使用火山方舟 ARK API Key。",
+  },
   {
     value: "openai",
     label: "OpenAI 兼容 (/audio/speech)",
@@ -58,7 +70,7 @@ export const TTS_PROVIDERS: TTSProviderMeta[] = [
     voices: [],
     keySource: "tts",
     editableBaseUrl: true,
-    hint: "兼容 OpenAI tts-1、硅基流动 CosyVoice、火山方舟等所有 /audio/speech 端点。",
+    hint: "兼容 OpenAI tts-1、硅基流动 CosyVoice 等 /audio/speech 端点。豆包语音请直接选择火山引擎平台。",
   },
   {
     value: "atlas",
@@ -129,11 +141,12 @@ export const TTS_PROVIDERS: TTSProviderMeta[] = [
   },
 ];
 
-export const DEFAULT_TTS_PROVIDER: TTSProvider = "openai";
+export const DEFAULT_TTS_PROVIDER: TTSProvider = "volcengine";
 
 /** 取平台元信息（容错：未知/旧配置回退到 openai） */
 export function getTTSProviderMeta(provider?: string | null): TTSProviderMeta {
-  return TTS_PROVIDERS.find((p) => p.value === provider) ?? TTS_PROVIDERS[0];
+  return TTS_PROVIDERS.find((p) => p.value === provider)
+    ?? TTS_PROVIDERS.find((p) => p.value === "openai")!;
 }
 
 /** 解析 TTS 配置时所需的最小输入形状（避免与 store 类型循环依赖） */
@@ -162,7 +175,7 @@ export interface ResolvedTTSConfig {
 
 /**
  * 把「平台选择 + 复用的 AI 平台 Key」解析成一份可直接发给后端的完整 TTS 配置。
- * Atlas/fal 的 Key 从 providers store 取；OpenAI 兼容/MiniMax 用 TTS 自带 Key。
+ * Atlas/fal 的 Key 从 providers store 取；豆包语音/OpenAI 兼容/MiniMax 用 TTS 自带 Key。
  */
 export function resolveTTSConfig(tts: TTSSettingLike | undefined, providers: ProvidersLike): ResolvedTTSConfig {
   const meta = getTTSProviderMeta(tts?.provider);

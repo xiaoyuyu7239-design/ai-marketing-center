@@ -99,4 +99,3 @@ flowchart LR
 | `src/lib/i18n/messages/*.ts` | 文案 key 多人同时加。 | key 带模块前缀，中文英文同 PR 补齐。 |
 | `src/app/project/[id]/assets/page.tsx` | 素材、模型、视频生成逻辑都在同页。 | 新能力优先抽工具函数或小组件。 |
 | `src/app/project/[id]/video/page.tsx` | 合成参数和轮询集中。 | 改合成 API 时同步更新这里和导出页 A/B 变体。 |
-

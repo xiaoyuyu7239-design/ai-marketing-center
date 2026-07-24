@@ -1,0 +1,11 @@
+[Unit]
+Description=Renew Huimai public-IP certificate for the Vercel origin
+After=network-online.target nginx.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/certbot-ip/bin/certbot renew --quiet --cert-name 124.220.90.186 --config-dir /etc/letsencrypt-ip --work-dir /var/lib/letsencrypt-ip --logs-dir /var/log/letsencrypt-ip "--deploy-hook=/usr/bin/systemctl reload nginx"
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

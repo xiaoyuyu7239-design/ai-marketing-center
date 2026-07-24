@@ -56,6 +56,9 @@ import {
 import {
   AGENT_GENERATION_SETTINGS_LATEST_KEY,
   DEFAULT_AGENT_GENERATION_SETTINGS,
+  LEGACY_AGENT_GENERATION_SETTINGS_LATEST_KEY,
+  SCRIPT_STYLE_OPTIONS,
+  migrateLegacyLatestAgentGenerationSettings,
   normalizeAgentGenerationSettings,
   parseStoredAgentGenerationSettings,
   projectAgentGenerationSettingsKey,
@@ -65,6 +68,8 @@ import {
   type AgentTargetDuration,
 } from "@backend/core/agent/agent-generation-settings";
 import type { RenderPreset } from "@backend/core/media/compose-presets";
+import { goldenTimeHint } from "@backend/core/publish/golden-time";
+import { CURRENT_LEGAL_CONSENT } from "@backend/shared/legal-documents";
 
 interface PickedImage {
   id: string;
@@ -72,19 +77,25 @@ interface PickedImage {
   file: File;
 }
 
-const showcaseItems = [
-  { videoSrc: "/case-videos/case-01.mp4" },
-  { videoSrc: "/case-videos/case-02.mp4" },
-  { videoSrc: "/case-videos/case-03.mp4" },
-  { videoSrc: "/case-videos/case-04.mp4" },
-  { videoSrc: "/case-videos/case-05.mp4" },
+type ShowcaseCategory = "美妆" | "美食" | "服装" | "鞋履" | "数码";
+
+interface ShowcaseItem {
+  videoSrc: string;
+  category: ShowcaseCategory;
+}
+
+// 公开仓库只引用已完成公开分发确认的案例素材。
+const showcaseItems: ShowcaseItem[] = [
+  { videoSrc: "/case-videos/case-01.mp4", category: "美妆" },
+  { videoSrc: "/case-videos/case-04.mp4", category: "数码" },
+  { videoSrc: "/case-videos/case-02.mp4", category: "美妆" },
+  { videoSrc: "/case-videos/case-05.mp4", category: "服装" },
+  { videoSrc: "/case-videos/case-03.mp4", category: "美妆" },
 ];
 
 const showcaseRows = Array.from({ length: Math.ceil(showcaseItems.length / 3) }, (_, index) =>
   showcaseItems.slice(index * 3, index * 3 + 3)
 );
-
-const userSessionKey = "clipforge_user_session";
 
 const qualityOptions: { value: "standard" | "hd"; label: string; resolution: AgentResolution; renderPreset: RenderPreset }[] = [
   { value: "standard", label: "标准", resolution: "720p", renderPreset: "fast" },
@@ -116,29 +127,68 @@ const PUBLISH_REMINDER_INTERVAL_MS = 30 * 60 * 1000;
 function inferProductName(idea: string, images: PickedImage[]) {
   const text = idea.trim();
   if (text) return text.slice(0, 60);
-  const fileName = images[0]?.file.name.replace(/\.[^.]+$/, "").trim();
-  return fileName || "商品推广";
+  // 没填描述时才退到文件名，但相机/截图默认名（如 "_ (7)"、"IMG_1234"）没有商品含义，
+  // 会污染标题/字幕并误导脚本；要求至少 2 个中文/字母字符才当商品名，否则用中性名。
+  const fileName = images[0]?.file.name.replace(/\.[^.]+$/, "").trim() ?? "";
+  const meaningful = (fileName.match(/[一-龥a-zA-Z]/g) || []).length >= 2;
+  return meaningful ? fileName.slice(0, 60) : "商品推广";
 }
 
 function publishHref(project: GenerationProject) {
   return `/project/${project.id}/export?publishReady=1`;
 }
 
-function hasSavedUserSession() {
-  try {
-    return typeof window !== "undefined" && window.localStorage?.getItem(userSessionKey) !== null;
-  } catch {
-    return false;
-  }
+function ShowcaseVideo({ item }: { item: ShowcaseItem }) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    const playVideo = () => {
+      void video.play().catch(() => undefined);
+    };
+
+    if (!("IntersectionObserver" in window)) {
+      playVideo();
+      return () => video.pause();
+    }
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry?.isIntersecting) {
+          playVideo();
+        } else {
+          video.pause();
+        }
+      },
+      { rootMargin: "240px 0px", threshold: 0.2 }
+    );
+
+    observer.observe(video);
+    return () => {
+      observer.disconnect();
+      video.pause();
+    };
+  }, []);
+
+  return (
+    <video
+      ref={videoRef}
+      className="h-full w-full object-cover"
+      src={item.videoSrc}
+      aria-label={`${item.category}案例展示视频`}
+      muted
+      loop
+      playsInline
+      preload="metadata"
+    >
+      您的浏览器暂不支持视频播放。
+    </video>
+  );
 }
 
-function saveUserSession(phone: string) {
-  try {
-    window.localStorage?.setItem(userSessionKey, JSON.stringify({ phone, loggedAt: new Date().toISOString() }));
-  } catch {
-    // 登录态仅用于当前前端体验；存储不可用时仍允许用户进入创作界面。
-  }
-}
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export default function AgentProjectPage() {
   const router = useRouter();
@@ -172,10 +222,18 @@ export default function AgentProjectPage() {
   const [historyPanelOpen, setHistoryPanelOpen] = useState(false);
   const [loginOpen, setLoginOpen] = useState(false);
   const [isUserLoggedIn, setIsUserLoggedIn] = useState(false);
-  const [phone, setPhone] = useState("");
-  const [verificationCode, setVerificationCode] = useState("");
-  const [codeSent, setCodeSent] = useState(false);
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authShopName, setAuthShopName] = useState("");
+  const [authCategory, setAuthCategory] = useState("");
+  const [authStoreType, setAuthStoreType] = useState("");
+  const [authRegion, setAuthRegion] = useState("");
+  const [authPlatforms, setAuthPlatforms] = useState("douyin");
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [isAuthSubmitting, setIsAuthSubmitting] = useState(false);
   const [agreed, setAgreed] = useState(false);
+  const [authRedirect, setAuthRedirect] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsHydrated, setSettingsHydrated] = useState(false);
   const [generationSettings, setGenerationSettings] = useState<AgentGenerationSettings>(DEFAULT_AGENT_GENERATION_SETTINGS);
@@ -183,6 +241,8 @@ export default function AgentProjectPage() {
   const fileRef = useRef<HTMLInputElement>(null);
   const initializedRef = useRef(false);
   const imagesRef = useRef<PickedImage[]>([]);
+  const resumeAfterAuthRef = useRef(false);
+  const submitGenerationRef = useRef<() => Promise<void>>(async () => undefined);
 
   const appendFiles = useCallback((files: File[] | FileList | null) => {
     if (!files) return;
@@ -222,14 +282,57 @@ export default function AgentProjectPage() {
     imagesRef.current = images;
   }, [images]);
 
+  const hydrateApprovalStore = useVideoApprovalStore((state) => state.hydrateFromServer);
+  const approvalHydrated = useVideoApprovalStore((state) => state.hydrated);
+  const [merchantProfile, setMerchantProfile] = useState<{ category?: string | null; platforms?: string | null; storeType?: string | null } | null>(null);
+  // 服务端算好的黄金时段提示（数据攒够后按商家自己的回流校准）；拿不到时回退本地行业模板的 goldenTimeHint
+  const [serverGoldenHint, setServerGoldenHint] = useState<string | null>(null);
+  // 本地门店（实体/都有）：黄金时段提醒用"到店决策时刻"窗口（如餐饮=饭点前），内容方向提示同城到店
+  const isLocalStoreMerchant = merchantProfile?.storeType === "local" || merchantProfile?.storeType === "both";
+
+  // 登录态以服务端会话为准（httpOnly cookie，前端读不到，只能问 /api/auth/me）；登录后顺带水合待发布库并记下建档画像
   useEffect(() => {
-    setIsUserLoggedIn(hasSavedUserSession());
+    let ignore = false;
+    fetch("/api/auth/me", { cache: "no-store" })
+      .then(async (res) => {
+        if (ignore) return;
+        setIsUserLoggedIn(res.ok);
+        if (res.ok) {
+          void hydrateApprovalStore();
+          const data = await res.json().catch(() => ({}));
+          if (!ignore && data.merchant) {
+            setMerchantProfile({ category: data.merchant.category, platforms: data.merchant.platforms, storeType: data.merchant.storeType });
+          }
+          // 登录态确认后再要服务端的黄金时段提示；失败静默，提醒气泡回退本地 goldenTimeHint
+          fetch("/api/reminders/settings", { cache: "no-store" })
+            .then(async (r) => {
+              if (ignore || !r.ok) return;
+              const d = await r.json().catch(() => ({}));
+              if (!ignore && typeof d.hint === "string" && d.hint) setServerGoldenHint(d.hint);
+            })
+            .catch(() => undefined);
+        }
+      })
+      .catch(() => {
+        if (!ignore) setIsUserLoggedIn(false);
+      });
+    return () => {
+      ignore = true;
+    };
+  }, [hydrateApprovalStore]);
+
+  // 从生成库存页"去历史记录"等入口带 #history 进来时，直接打开历史面板
+  useEffect(() => {
+    if (typeof window !== "undefined" && window.location.hash === "#history") {
+      setHistoryPanelOpen(true);
+    }
   }, []);
 
   useEffect(() => {
-    const saved = parseStoredAgentGenerationSettings(
-      typeof window !== "undefined" ? window.localStorage?.getItem(AGENT_GENERATION_SETTINGS_LATEST_KEY) : null
-    );
+    const saved = parseStoredAgentGenerationSettings(window.localStorage?.getItem(AGENT_GENERATION_SETTINGS_LATEST_KEY))
+      ?? migrateLegacyLatestAgentGenerationSettings(
+        window.localStorage?.getItem(LEGACY_AGENT_GENERATION_SETTINGS_LATEST_KEY)
+      );
     if (saved) setGenerationSettings(saved);
     setSettingsHydrated(true);
   }, []);
@@ -310,7 +413,15 @@ export default function AgentProjectPage() {
   const primaryImage = images[0];
   const extraImages = images.slice(1, 4);
   const hiddenExtraImageCount = Math.max(0, images.length - 4);
-  const canLogin = phone.trim().length > 0 && verificationCode.trim().length > 0 && agreed;
+  const canLogin =
+    EMAIL_RE.test(authEmail.trim()) &&
+    authPassword.length >= 8 &&
+    (authMode === "login" || (
+      agreed &&
+      Boolean(authShopName.trim() && authCategory && authStoreType && authPlatforms) &&
+      (!(authStoreType === "local" || authStoreType === "both") || Boolean(authRegion.trim()))
+    )) &&
+    !isAuthSubmitting;
   const fallbackPendingPublishItems = useMemo(
     () => rankTodayPublishCandidates(historyItems, approvedVideos, dailyPickCount, publishPickStrategy, new Date(), publishedVideos),
     [approvedVideos, dailyPickCount, historyItems, publishedVideos, publishPickStrategy]
@@ -333,13 +444,11 @@ export default function AgentProjectPage() {
 
     async function rankPendingItems() {
       try {
+        // 项目与入库/发布状态服务端已有权威数据，只需传数量与策略
         const res = await fetch("/api/llm/publish-ranker", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            projects: historyItems,
-            approved: approvedVideos,
-            published: publishedVideos,
             count: dailyPickCount,
             strategy: publishPickStrategy,
           }),
@@ -377,7 +486,8 @@ export default function AgentProjectPage() {
     () => historyItems.filter((project) => isProjectApproved(project, approvedVideos)).length,
     [approvedVideos, historyItems]
   );
-  const hasLowInventory = !isLoadingHistory && isLowGenerationInventory(approvedInventoryCount);
+  // 待发布库尚未从服务端水合完成前不判断库存不足，否则页面加载瞬间必闪一次错误告警
+  const hasLowInventory = approvalHydrated && !isLoadingHistory && isLowGenerationInventory(approvedInventoryCount);
   const inventoryDeficit = Math.max(0, LOW_GENERATION_INVENTORY_THRESHOLD - approvedInventoryCount);
   const pendingPublishCount = pendingPublishItems.length;
   const publishReminderCandidate = pendingPublishItems[0];
@@ -410,7 +520,8 @@ export default function AgentProjectPage() {
     qualityOptions.find((item) => item.resolution === generationSettings.resolution) ??
     qualityOptions[0];
   const selectedAspectRatio = aspectRatioOptions.find((item) => item.value === generationSettings.aspectRatio) ?? aspectRatioOptions[0];
-  const generationSummary = `${selectedAspectRatio.label} · ${generationSettings.targetDuration}s · ${selectedQuality.label}`;
+  const selectedStyle = SCRIPT_STYLE_OPTIONS.find((item) => item.value === generationSettings.styleType) ?? SCRIPT_STYLE_OPTIONS[0];
+  const generationSummary = `${selectedAspectRatio.label} · ${generationSettings.targetDuration}s · ${selectedQuality.label} · ${selectedStyle.label}`;
   const shouldShowUploadHint = Boolean(uploadHint && !/^已添加 \d+ 张$/.test(uploadHint));
 
   const updateGenerationSettings = (patch: Partial<AgentGenerationSettings>) => {
@@ -425,14 +536,86 @@ export default function AgentProjectPage() {
     }));
   };
 
-  const handleLoginSubmit = (event: FormEvent<HTMLFormElement>) => {
+  const openLogin = (redirectTo: string | null = null, resumeGeneration = false) => {
+    resumeAfterAuthRef.current = resumeGeneration;
+    setAuthRedirect(redirectTo);
+    setAuthError(null);
+    setLoginOpen(true);
+  };
+
+  const handleLoginSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!canLogin) return;
-    saveUserSession(phone.trim());
-    setIsUserLoggedIn(true);
-    setLoginOpen(false);
-    router.replace("/project/agent");
+    setIsAuthSubmitting(true);
+    setAuthError(null);
+    try {
+      const endpoint = authMode === "register" ? "/api/auth/register" : "/api/auth/login";
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: authEmail.trim(),
+          password: authPassword,
+          ...(authMode === "register" && authShopName.trim() ? { shopName: authShopName.trim() } : {}),
+          ...(authMode === "register"
+            ? {
+                category: authCategory,
+                storeType: authStoreType,
+                region: authRegion.trim(),
+                platforms: authPlatforms,
+              }
+            : {}),
+          ...(authMode === "register"
+            ? { legalConsent: { accepted: agreed, ...CURRENT_LEGAL_CONSENT } }
+            : {}),
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setAuthError(typeof data.error === "string" ? data.error : "登录失败，请重试");
+        return;
+      }
+      const redirectAfterLogin = authRedirect;
+      const resumeGeneration = resumeAfterAuthRef.current;
+      resumeAfterAuthRef.current = false;
+      setIsUserLoggedIn(true);
+      if (data.merchant) {
+        setMerchantProfile({
+          category: data.merchant.category ?? null,
+          platforms: data.merchant.platforms ?? null,
+          storeType: data.merchant.storeType ?? null,
+        });
+      }
+      setLoginOpen(false);
+      setAuthRedirect(null);
+      setAuthPassword("");
+      setAgreed(false);
+      void hydrateApprovalStore();
+      if (redirectAfterLogin) {
+        router.push(redirectAfterLogin);
+        return;
+      }
+      if (resumeGeneration) {
+        window.setTimeout(() => void submitGenerationRef.current(), 0);
+        return;
+      }
+      // 登录前拉取历史会 401 得到空列表，登录成功后重新拉一次
+      try {
+        const historyRes = await fetch("/api/project", { cache: "no-store" });
+        const historyData: unknown = await historyRes.json().catch(() => []);
+        if (historyRes.ok) setHistoryItems(sortProjectsByUpdatedDesc(coerceGenerationProjects(historyData)));
+      } catch {
+        // 历史刷新失败不阻塞登录
+      }
+    } catch {
+      setAuthError("网络异常，请稍后重试");
+    } finally {
+      setIsAuthSubmitting(false);
+    }
   };
+
+  // 生产线：宣传视频 or 朋友圈图片套装（清洗环节两条线共用）
+  const [productionLine, setProductionLine] = useState<"video" | "images">("video");
 
   const handleSubmit = async () => {
     if (!canSubmit || isSubmitting) return;
@@ -444,18 +627,28 @@ export default function AgentProjectPage() {
 
     try {
       setProgress({ percent: 16, message: "正在接收素材" });
+      // 品类优先用商家建档画像（黄金时间提醒/脚本模板都按它走），没建档才落 other
+      const productCategory = merchantProfile?.category || "other";
       const projectRes = await fetch("/api/project", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          name: `${productName} 推广`,
+          name: productionLine === "images" ? `${productName} 图片套装` : `${productName} 推广`,
           productName,
-          productCategory: "other",
+          productCategory,
           productDescription,
           productImages: [],
           videoMode: "product_closeup",
+          ...(productionLine === "images" && { contentType: "image_pack" }),
         }),
       });
+      if (projectRes.status === 401) {
+        openLogin(null, true);
+        setError("请先登录，再开始生成");
+        setIsSubmitting(false);
+        setProgress(null);
+        return;
+      }
       const project = await projectRes.json().catch(() => ({}));
       if (!projectRes.ok || !project.id) throw new Error(project.error || "项目创建失败");
       try {
@@ -479,6 +672,38 @@ export default function AgentProjectPage() {
       });
       if (!patchRes.ok) throw new Error("项目图片保存失败");
 
+      // 商品图自动清洗：随手拍/杂乱背景 → 干净主图，两条线共用地基（单张 ~10s；失败自动回退原图不阻断）
+      setProgress({ percent: 52, message: "正在清洗商品图（去杂乱背景、重打光）" });
+      let workingPaths: string[] = uploadData.paths;
+      try {
+        const cleanRes = await fetch(`/api/project/${project.id}/clean-images`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ paths: uploadData.paths }),
+        });
+        const cleanData = await cleanRes.json().catch(() => ({}));
+        if (cleanRes.ok && Array.isArray(cleanData.productImages)) {
+          workingPaths = cleanData.productImages;
+        }
+      } catch {
+        // 清洗失败继续用原图，宁可效果打折也不阻断生成
+      }
+
+      if (productionLine === "images") {
+        // 图片套装线：LLM 写"图组脚本 + 朋友圈文案"，然后进入图片套装页逐张生成
+        setProgress({ percent: 80, message: "正在编写图组方案与朋友圈文案" });
+        const packRes = await fetch(`/api/project/${project.id}/image-pack`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ locale }),
+        });
+        const packData = await packRes.json().catch(() => ({}));
+        if (!packRes.ok) throw new Error(packData.error || "图片套装脚本生成失败");
+        setProgress({ percent: 100, message: "正在进入图片套装工作台" });
+        router.push(`/project/${project.id}/images`);
+        return;
+      }
+
       setProgress({ percent: 70, message: "Agent 正在生成短片方案" });
       const scriptRes = await fetch("/api/llm/script", {
         method: "POST",
@@ -486,21 +711,30 @@ export default function AgentProjectPage() {
         body: JSON.stringify({
           projectId: project.id,
           productName,
-          category: "other",
+          category: productCategory,
           productDescription,
           targetDuration: generationSettings.targetDuration,
-          styleType: "auto",
+          // 内容方向由老板在"更多设置"里点选；auto=按账号历史转化数据智能选
+          styleType: generationSettings.styleType,
           videoMode: "product_closeup",
-          productImages: uploadData.paths,
-          platforms: "douyin",
+          productImages: workingPaths,
+          // 平台不在这里写死：不传则服务端用商家建档的"主投平台"兜底
           quick: true,
           count: 1,
-          timeoutMs: 10000,
-          maxTokens: 2500,
+          // 脚本输出语言跟随界面语言（英文品名的商品在中文用户这里也该出中文脚本）
+          locale,
+          // 一套完整脚本已升级到 9-12 分镜+概念规则（~4000token），模型关掉思考也要 ~30s 输出，
+          // 超时给足 60s——宁可老板多等一会儿拿到真 AI 脚本，也别撞墙降级成占位模板（宁可慢也别假）
+          timeoutMs: 60000,
+          maxTokens: 5000,
         }),
       });
       const scriptData = await scriptRes.json().catch(() => ({}));
       if (!scriptRes.ok) throw new Error(scriptData.error || "脚本生成失败");
+      // AI 超时降级成模板时如实告知（响应带 warning），别让老板把罐头模板当成 AI 成稿
+      if (scriptData.warning) {
+        window.sessionStorage?.setItem(`clipforge_script_warning:${project.id}`, String(scriptData.warning));
+      }
 
       setProgress({ percent: 100, message: "正在进入生成工作台" });
       router.push(`/project/${project.id}/script`);
@@ -510,6 +744,8 @@ export default function AgentProjectPage() {
       setProgress(null);
     }
   };
+
+  submitGenerationRef.current = handleSubmit;
 
   return (
     <div className="relative min-h-screen text-[#111111]" style={agentLayoutStyle}>
@@ -581,12 +817,27 @@ export default function AgentProjectPage() {
                 router.replace("/project/agent");
                 return;
               }
-              setLoginOpen(true);
+              openLogin();
             }}
             className="rounded-md px-1 py-1 text-[13px] font-extrabold tracking-[0.08em] text-[#6B7280] transition hover:text-[#111111] xl:text-[14px]"
             aria-label={isUserLoggedIn ? "进入我的创作界面" : "登录"}
           >
             {isUserLoggedIn ? "我的" : "登录"}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              if (isUserLoggedIn) {
+                router.push("/settings");
+                return;
+              }
+              openLogin("/settings");
+            }}
+            className="rounded-md px-1 py-1 text-[13px] font-extrabold tracking-[0.08em] text-[#6B7280] transition hover:text-[#111111] xl:text-[14px]"
+            aria-label="店铺与创作偏好"
+            title="店铺与创作偏好"
+          >
+            设置
           </button>
           <Menu className="size-5 xl:size-6" />
         </div>
@@ -718,10 +969,14 @@ export default function AgentProjectPage() {
 
       {loginOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 px-4 py-8">
-          <div className="relative w-full max-w-[520px] rounded-[24px] bg-white px-7 py-7 text-[#111111] shadow-[0_24px_70px_rgba(0,0,0,0.24)] sm:px-8">
+          <div className="relative max-h-[calc(100vh-4rem)] w-full max-w-[520px] overflow-y-auto rounded-[24px] bg-white px-7 py-7 text-[#111111] shadow-[0_24px_70px_rgba(0,0,0,0.24)] sm:px-8">
             <button
               type="button"
-              onClick={() => setLoginOpen(false)}
+              onClick={() => {
+                setLoginOpen(false);
+                setAuthRedirect(null);
+                resumeAfterAuthRef.current = false;
+              }}
               className="absolute right-7 top-7 grid size-7 place-items-center rounded-full text-[#111111] transition hover:bg-[#F0F1F3]"
               aria-label="关闭登录"
             >
@@ -733,68 +988,157 @@ export default function AgentProjectPage() {
               <span>绘卖AI</span>
             </div>
             <h2 className="mt-3 text-[28px] font-black leading-tight tracking-normal text-[#111111]">
-              欢迎登录绘卖
+              {authMode === "register" ? "注册商家账号" : "欢迎登录绘卖"}
             </h2>
 
             <form className="mt-8 space-y-5" onSubmit={handleLoginSubmit}>
               <label className="block">
-                <span className="text-[15px] font-extrabold text-[#111111]">手机号</span>
+                <span className="text-[15px] font-extrabold text-[#111111]">邮箱</span>
                 <input
-                  value={phone}
-                  onChange={(event) => setPhone(event.target.value)}
-                  type="tel"
-                  inputMode="tel"
+                  value={authEmail}
+                  onChange={(event) => setAuthEmail(event.target.value)}
+                  type="email"
+                  inputMode="email"
+                  autoComplete="email"
                   autoFocus
-                  placeholder="请输入手机号"
+                  placeholder="请输入邮箱"
                   className="mt-2.5 h-12 w-full rounded-xl border-0 bg-[#F0F0F1] px-4 text-[16px] font-semibold text-[#111111] outline-none placeholder:text-[#9BA3AD]"
                 />
               </label>
 
               <label className="block">
-                <span className="text-[15px] font-extrabold text-[#111111]">验证码</span>
-                <div className="mt-2.5 flex h-12 overflow-hidden rounded-xl bg-[#F0F0F1]">
-                  <input
-                    value={verificationCode}
-                    onChange={(event) => setVerificationCode(event.target.value)}
-                    inputMode="numeric"
-                    placeholder="请输入验证码"
-                    className="min-w-0 flex-1 border-0 bg-transparent px-4 text-[16px] font-semibold text-[#111111] outline-none placeholder:text-[#9BA3AD]"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setCodeSent(true)}
-                    disabled={phone.trim().length === 0}
-                    className="m-1 min-w-[112px] rounded-xl border border-white bg-white/70 px-3 text-[14px] font-extrabold text-[#B2B7BE] transition enabled:text-[#6B7280] enabled:hover:text-[#111111] disabled:cursor-not-allowed"
-                  >
-                    {codeSent ? "已发送" : "发送验证码"}
-                  </button>
-                </div>
+                <span className="text-[15px] font-extrabold text-[#111111]">密码</span>
+                <input
+                  value={authPassword}
+                  onChange={(event) => setAuthPassword(event.target.value)}
+                  type="password"
+                  autoComplete={authMode === "register" ? "new-password" : "current-password"}
+                  placeholder="至少 8 位"
+                  className="mt-2.5 h-12 w-full rounded-xl border-0 bg-[#F0F0F1] px-4 text-[16px] font-semibold text-[#111111] outline-none placeholder:text-[#9BA3AD]"
+                />
               </label>
+
+              {authMode === "register" && (
+                <>
+                  <label className="block">
+                    <span className="text-[15px] font-extrabold text-[#111111]">店铺/品牌名</span>
+                    <input
+                      value={authShopName}
+                      onChange={(event) => setAuthShopName(event.target.value)}
+                      type="text"
+                      placeholder="如：云柔纸品旗舰店"
+                      className="mt-2.5 h-12 w-full rounded-xl border-0 bg-[#F0F0F1] px-4 text-[16px] font-semibold text-[#111111] outline-none placeholder:text-[#9BA3AD]"
+                    />
+                  </label>
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <label className="block">
+                      <span className="text-[15px] font-extrabold text-[#111111]">主营品类</span>
+                      <select
+                        value={authCategory}
+                        onChange={(event) => setAuthCategory(event.target.value)}
+                        className="mt-2.5 h-12 w-full rounded-xl border-0 bg-[#F0F0F1] px-4 text-[15px] font-semibold text-[#111111] outline-none"
+                      >
+                        <option value="">请选择</option>
+                        <option value="beauty">美妆护肤</option>
+                        <option value="food">食品零食</option>
+                        <option value="home">家居日用</option>
+                        <option value="fashion">服饰鞋包</option>
+                        <option value="tech">数码 3C</option>
+                        <option value="other">其他</option>
+                      </select>
+                    </label>
+                    <label className="block">
+                      <span className="text-[15px] font-extrabold text-[#111111]">经营形态</span>
+                      <select
+                        value={authStoreType}
+                        onChange={(event) => setAuthStoreType(event.target.value)}
+                        className="mt-2.5 h-12 w-full rounded-xl border-0 bg-[#F0F0F1] px-4 text-[15px] font-semibold text-[#111111] outline-none"
+                      >
+                        <option value="">请选择</option>
+                        <option value="ecommerce">纯电商</option>
+                        <option value="local">实体门店</option>
+                        <option value="both">线上线下都有</option>
+                      </select>
+                    </label>
+                  </div>
+                  {(authStoreType === "local" || authStoreType === "both") && (
+                    <label className="block">
+                      <span className="text-[15px] font-extrabold text-[#111111]">门店所在城市</span>
+                      <input
+                        value={authRegion}
+                        onChange={(event) => setAuthRegion(event.target.value)}
+                        type="text"
+                        placeholder="如：杭州"
+                        className="mt-2.5 h-12 w-full rounded-xl border-0 bg-[#F0F0F1] px-4 text-[16px] font-semibold text-[#111111] outline-none placeholder:text-[#9BA3AD]"
+                      />
+                    </label>
+                  )}
+                  <label className="block">
+                    <span className="text-[15px] font-extrabold text-[#111111]">主投平台</span>
+                    <select
+                      value={authPlatforms}
+                      onChange={(event) => setAuthPlatforms(event.target.value)}
+                      className="mt-2.5 h-12 w-full rounded-xl border-0 bg-[#F0F0F1] px-4 text-[15px] font-semibold text-[#111111] outline-none"
+                    >
+                      <option value="douyin">抖音</option>
+                      <option value="xiaohongshu">小红书</option>
+                      <option value="kuaishou">快手</option>
+                      <option value="tiktok">TikTok</option>
+                    </select>
+                    <span className="mt-2 block text-[12px] font-semibold text-[#7B8490]">约 60 秒完成，首片会直接使用这些偏好。</span>
+                  </label>
+                  <p className="rounded-xl bg-[#F4F5F7] px-4 py-3 text-[12px] font-semibold leading-5 text-[#66717E]">
+                    绘卖当前仅开放邀请内测，请使用收到邀请的邮箱注册；未在本轮名单中的邮箱会被拒绝。
+                  </p>
+                </>
+              )}
+
+              {authError && (
+                <p className="rounded-lg bg-[#F5F6F8] px-3 py-2 text-[13px] font-bold text-[#B4232C]" role="alert">
+                  {authError}
+                </p>
+              )}
 
               <button
                 type="submit"
                 disabled={!canLogin}
                 className="h-12 w-full rounded-xl bg-[#D9DDE2] text-[16px] font-extrabold text-white transition enabled:bg-[#111111] enabled:hover:bg-[#2B2B2B] disabled:cursor-not-allowed"
               >
-                登录
+                {isAuthSubmitting ? "请稍候…" : authMode === "register" ? "注册并登录" : "登录"}
               </button>
 
-              <label className="flex cursor-pointer items-center gap-3 text-[13px] font-semibold text-[#5F6874]">
-                <input
-                  type="checkbox"
-                  checked={agreed}
-                  onChange={(event) => setAgreed(event.target.checked)}
-                  className="peer sr-only"
-                />
-                <span className="grid size-5 shrink-0 place-items-center rounded-md border-2 border-[#728095] text-white peer-checked:border-[#111111] peer-checked:bg-[#111111]">
-                  <span className="text-[12px] leading-none">✓</span>
-                </span>
-                <span>
-                  已阅读并同意<span className="font-extrabold text-[#111111]">用户服务协议</span>、
-                  <span className="font-extrabold text-[#111111]">隐私政策</span>、
-                  <span className="font-extrabold text-[#111111]">AI功能使用须知</span>
-                </span>
-              </label>
+              <div className="flex items-center justify-between">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuthMode((mode) => (mode === "register" ? "login" : "register"));
+                    setAuthError(null);
+                  }}
+                  className="text-[13px] font-extrabold text-[#6B7280] transition hover:text-[#111111]"
+                >
+                  {authMode === "register" ? "已有账号？去登录" : "没有账号？注册一个"}
+                </button>
+              </div>
+
+              {authMode === "register" && (
+                <label className="flex cursor-pointer items-center gap-3 text-[13px] font-semibold text-[#5F6874]">
+                  <input
+                    type="checkbox"
+                    checked={agreed}
+                    onChange={(event) => setAgreed(event.target.checked)}
+                    className="peer sr-only"
+                  />
+                  <span className="grid size-5 shrink-0 place-items-center rounded-md border-2 border-[#728095] text-white peer-checked:border-[#111111] peer-checked:bg-[#111111]">
+                    <span className="text-[12px] leading-none">✓</span>
+                  </span>
+                  <span>
+                    已阅读并同意
+                    <Link href="/legal/terms" target="_blank" rel="noreferrer" onClick={(event) => event.stopPropagation()} className="font-extrabold text-[#111111] underline underline-offset-2">用户服务协议</Link>、
+                    <Link href="/legal/privacy" target="_blank" rel="noreferrer" onClick={(event) => event.stopPropagation()} className="font-extrabold text-[#111111] underline underline-offset-2">隐私政策</Link>、
+                    <Link href="/legal/ai-notice" target="_blank" rel="noreferrer" onClick={(event) => event.stopPropagation()} className="font-extrabold text-[#111111] underline underline-offset-2">AI功能使用须知</Link>
+                  </span>
+                </label>
+              )}
             </form>
           </div>
         </div>
@@ -805,9 +1149,20 @@ export default function AgentProjectPage() {
           <Link href="/project/agent" className="grid h-12 w-10 place-items-center text-[#111827]" aria-label="创作界面">
             <BrandWheatMark className="h-11 w-9" />
           </Link>
-          <Link href="/settings" className="rounded-lg border border-[#DDE2E8] bg-white px-3 py-2 text-sm font-semibold text-[#222222]">
+          <button
+            type="button"
+            onClick={() => {
+              if (isUserLoggedIn) {
+                router.push("/settings");
+                return;
+              }
+              openLogin("/settings");
+            }}
+            className="rounded-lg border border-[#DDE2E8] bg-white px-3 py-2 text-sm font-semibold text-[#222222]"
+            title="店铺与创作偏好"
+          >
             设置
-          </Link>
+          </button>
         </header>
 
         <main className="mx-auto flex min-h-screen w-full max-w-[1180px] flex-col px-5 pb-12 pt-6 sm:px-8 lg:px-10 lg:pt-16">
@@ -824,7 +1179,7 @@ export default function AgentProjectPage() {
               </button>
             </div>
             <h1 className="text-center text-[28px] font-extrabold leading-tight text-[#111111] sm:text-[36px]">
-              一键绘成，即刻开卖
+              上传商品图，先出短片方案
             </h1>
 
             <div className={`mt-7 rounded-2xl border border-[#DFE4EA] bg-white p-2.5 sm:p-3 ${wrappedUnderlayClass}`}>
@@ -973,25 +1328,48 @@ export default function AgentProjectPage() {
                       </button>
                     </div>
                   </div>
-                  <button
-                    type="button"
-                    onClick={handleSubmit}
-                    disabled={!canSubmit || isSubmitting}
-                    className="inline-flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-[#E2E5EA] px-5 text-[15px] font-extrabold text-white transition enabled:bg-[#111111] enabled:hover:bg-[#2A2A2A] disabled:cursor-not-allowed sm:w-auto"
-                    aria-label="开始生成视频"
-                  >
-                    {isSubmitting ? (
-                      <>
-                        <Loader2 className="size-4 animate-spin" />
-                        正在生成
-                      </>
-                    ) : (
-                      <>
-                        {canSubmit ? "开始生成视频" : "先上传商品图"}
-                        <ArrowUp className="size-4" />
-                      </>
-                    )}
-                  </button>
+                  <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
+                    {/* 生产线选择：上传随手拍后，可先出一套朋友圈宣传图，也可直接出视频（清洗共用） */}
+                    <div className="flex rounded-xl border border-[#E5E9EF] bg-white p-1">
+                      <button
+                        type="button"
+                        onClick={() => setProductionLine("video")}
+                        className={`h-9 rounded-lg px-3 text-[13px] font-extrabold transition ${
+                          productionLine === "video" ? "bg-[#111111] text-white" : "text-[#6E7784] hover:text-[#111111]"
+                        }`}
+                      >
+                        宣传视频
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setProductionLine("images")}
+                        className={`h-9 rounded-lg px-3 text-[13px] font-extrabold transition ${
+                          productionLine === "images" ? "bg-[#111111] text-white" : "text-[#6E7784] hover:text-[#111111]"
+                        }`}
+                      >
+                        图片套装
+                      </button>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleSubmit}
+                      disabled={!canSubmit || isSubmitting}
+                      className="inline-flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-[#E2E5EA] px-5 text-[15px] font-extrabold text-white transition enabled:bg-[#111111] enabled:hover:bg-[#2A2A2A] disabled:cursor-not-allowed sm:w-auto"
+                      aria-label={productionLine === "images" ? "开始生成图片套装" : "生成首片方案"}
+                    >
+                      {isSubmitting ? (
+                        <>
+                          <Loader2 className="size-4 animate-spin" />
+                          正在生成
+                        </>
+                      ) : (
+                        <>
+                          {canSubmit ? (productionLine === "images" ? "生成图片套装" : "生成首片方案") : "先上传商品图"}
+                          <ArrowUp className="size-4" />
+                        </>
+                      )}
+                    </button>
+                  </div>
                 </div>
 
                 {settingsOpen && (
@@ -1077,6 +1455,49 @@ export default function AgentProjectPage() {
                         </div>
                       </div>
                     </div>
+
+                    <div className="mt-3">
+                      <div className="text-[12px] font-extrabold text-[#6F7885]">内容方向</div>
+                      <div className="mt-2 grid grid-cols-2 gap-1.5 sm:grid-cols-5">
+                        {SCRIPT_STYLE_OPTIONS.map((option) => {
+                          const selected = generationSettings.styleType === option.value;
+                          return (
+                            <button
+                              key={option.value}
+                              type="button"
+                              onClick={() => updateGenerationSettings({ styleType: option.value })}
+                              className={`min-h-12 rounded-lg border px-2 text-center text-[12px] font-extrabold transition ${
+                                selected
+                                  ? "border-[#111111] bg-[#E8E8E8] text-[#111111]"
+                                  : "border-[#E5E9EF] bg-white text-[#6E7784] hover:border-[#B8C0CB]"
+                              }`}
+                            >
+                              <span className="block">{option.label}</span>
+                              <span className="block text-[11px] font-bold text-[#8A94A0]">{option.hint}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* 配音开关放在生成前：合成页的开关太靠后容易被遗忘（合成页会沿用这里的选择） */}
+                    <div className="mt-3 flex items-center justify-between rounded-lg border border-[#E5E9EF] bg-white px-3 py-2.5">
+                      <div>
+                        <div className="text-[12px] font-extrabold text-[#6F7885]">AI 配音旁白</div>
+                        <p className="text-[11px] font-bold text-[#8A94A0]">关闭＝纯音乐+贴字（推荐）；开启后成片带机器配音</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => updateGenerationSettings({ voiceoverEnabled: !generationSettings.voiceoverEnabled })}
+                        className={`min-h-9 rounded-full border px-4 text-[12px] font-extrabold transition ${
+                          generationSettings.voiceoverEnabled
+                            ? "border-[#111111] bg-[#111111] text-white"
+                            : "border-[#E5E9EF] bg-white text-[#6E7784] hover:border-[#B8C0CB]"
+                        }`}
+                      >
+                        {generationSettings.voiceoverEnabled ? "已开启" : "已关闭"}
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>
@@ -1116,16 +1537,7 @@ export default function AgentProjectPage() {
                     {row.map((item) => (
                       <div key={item.videoSrc} className="group min-w-0 overflow-hidden rounded-lg border border-[#DDE2E8] bg-white">
                         <div className="relative aspect-[9/16] bg-[#E8EAED]">
-                          <video
-                            className="h-full w-full object-cover"
-                            src={item.videoSrc}
-                            aria-label="案例展示视频"
-                            autoPlay
-                            muted
-                            loop
-                            playsInline
-                            preload="metadata"
-                          />
+                          <ShowcaseVideo item={item} />
                           <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(0,0,0,0.18),rgba(0,0,0,0)_26%,rgba(0,0,0,0.18))]" />
                           <div className="absolute right-4 top-4 grid size-9 place-items-center rounded-full bg-white/64 text-[#303741] backdrop-blur-sm">
                             <Play className="ml-0.5 size-4 fill-[#303741] text-[#303741]" />
@@ -1177,8 +1589,9 @@ export default function AgentProjectPage() {
                   <X className="size-3.5" />
                 </button>
               </div>
-              <p className="mt-1 line-clamp-2 text-[13px] font-semibold leading-5 text-[#6F7885]">
-                建议及时发布「{projectTitle(publishReminderCandidate.project)}」，保持当天发布节奏。
+              <p className="mt-1 line-clamp-3 text-[13px] font-semibold leading-5 text-[#6F7885]">
+                建议发布「{projectTitle(publishReminderCandidate.project)}」。
+                {serverGoldenHint ?? goldenTimeHint(publishReminderCandidate.project.productCategory, new Date(), { localStore: isLocalStoreMerchant }).hint}
               </p>
               <div className="mt-3 flex gap-2">
                 <Link
@@ -1187,16 +1600,13 @@ export default function AgentProjectPage() {
                 >
                   去发布
                 </Link>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setPendingPublishOpen(true);
-                    setPublishReminderVisible(false);
-                  }}
+                <Link
+                  href="/products"
+                  onClick={() => setPublishReminderVisible(false)}
                   className="inline-flex h-9 items-center justify-center rounded-xl border border-[#DDE2E8] bg-white px-3 text-[13px] font-black text-[#2F3742] transition hover:bg-[#F4F6F8]"
                 >
                   查看全部
-                </button>
+                </Link>
               </div>
             </div>
           </div>

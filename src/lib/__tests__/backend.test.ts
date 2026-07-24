@@ -127,6 +127,7 @@ describe("buildUserPrompt", () => {
 describe("buildComposeCommand", () => {
   const baseConfig: ComposeConfig = {
     projectId: "test-project-001",
+    compositionId: "composition-test-001",
     clips: [
       { type: "image", filePath: "/data/img1.jpg", duration: 3, transition: "direct_concat", motion: "zoom_in_slow" },
       { type: "video", filePath: "/data/clip2.mp4", duration: 5, transition: "ffmpeg_fade" },
@@ -368,8 +369,8 @@ describe("buildComposeCommand", () => {
     const cmd = buildComposeCommand(baseConfig);
     expect(cmd).toContain("-metadata comment=");
     expect(cmd).toContain("AIGC=1");
-    expect(cmd).toContain("ClipForge");
-    expect(cmd).toContain(baseConfig.projectId); // 内容制作编号=projectId
+    expect(cmd).toContain("绘卖AI"); // 开发态缺省值；生产环境由 HUIMAI_AIGC_SERVICE_PROVIDER 强制覆盖
+    expect(cmd).toContain(baseConfig.compositionId); // 内容制作编号=唯一 compositionId
     // -metadata 在 -movflags 之后、且在最终输出文件之前
     expect(cmd.indexOf("-metadata")).toBeGreaterThan(cmd.indexOf("-movflags"));
     expect(cmd.lastIndexOf("-metadata")).toBeLessThan(cmd.lastIndexOf(".mp4"));
@@ -426,7 +427,23 @@ describe("buildComposeCommand", () => {
   it("输出文件路径正确", () => {
     const cmd = buildComposeCommand(baseConfig);
     expect(cmd).toContain("test-project-001");
-    expect(cmd).toMatch(/final_\d+\.mp4/);
+    expect(cmd).toContain("final_composition-test-001.part.mp4");
+  });
+
+  it("AIGC 隐式标识使用生产服务提供者配置，retry 保持 compositionId 不变", () => {
+    const previous = process.env.HUIMAI_AIGC_SERVICE_PROVIDER;
+    process.env.HUIMAI_AIGC_SERVICE_PROVIDER = "测试运营主体-001";
+    try {
+      const first = buildComposeCommand(baseConfig);
+      const retry = buildComposeCommand(baseConfig);
+      expect(first).toContain("服务提供者=测试运营主体-001");
+      expect(first).toContain("内容制作编号=composition-test-001");
+      expect(retry).toContain("内容制作编号=composition-test-001");
+      expect(retry).toContain("final_composition-test-001.part.mp4");
+    } finally {
+      if (previous === undefined) delete process.env.HUIMAI_AIGC_SERVICE_PROVIDER;
+      else process.env.HUIMAI_AIGC_SERVICE_PROVIDER = previous;
+    }
   });
 
   it("每个视频片段归一化像素格式/SAR/帧率/时基（避免混用真实素材时 xfade/concat 崩溃）", () => {

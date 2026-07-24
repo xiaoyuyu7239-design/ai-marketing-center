@@ -30,6 +30,7 @@ describe("ffmpeg/ffprobe 二进制路径解析", () => {
   it("buildComposeCommand 用注入的 FFMPEG_PATH（含空格被引号包裹）", () => {
     const cfg: ComposeConfig = {
       projectId: "p1",
+      compositionId: "c1",
       clips: [{ type: "image", filePath: "/d/a.jpg", duration: 3, transition: "direct_concat", motion: "static" }],
       output: { resolution: "1080p", aspectRatio: "9:16" },
     };
@@ -42,6 +43,7 @@ describe("ffmpeg/ffprobe 二进制路径解析", () => {
     delete process.env.FFMPEG_PATH;
     const cfg: ComposeConfig = {
       projectId: "p1",
+      compositionId: "c2",
       clips: [{ type: "image", filePath: "/d/a.jpg", duration: 3, transition: "direct_concat", motion: "static" }],
       output: { resolution: "1080p", aspectRatio: "9:16" },
     };

@@ -5,7 +5,7 @@
  * 复用 composer 现有 overlay（textOverlay）渲染管线，纯函数可单测。
  */
 
-export type OverlayStyle = "title" | "highlight" | "price";
+export type OverlayStyle = "title" | "highlight" | "price" | "disclosure";
 export interface ComplianceOverlay {
   text: string;
   style: OverlayStyle;
@@ -13,9 +13,9 @@ export interface ComplianceOverlay {
   endTime: number;
 }
 export interface ComplianceOverlayOpts {
-  /** 加「AI 生成」合规标识（全程显示，顶部） */
+  /** 兼容旧调用；邀请内测由服务端强制显示，传 false 也不会关闭。 */
   aiDisclosure?: boolean;
-  /** 自定义合规标识文案，默认「AI 生成 · 广告」 */
+  /** 服务端可配置的合规标识文案，默认「AI生成/辅助」 */
   disclosureText?: string;
   /** 片尾购买 CTA 文案（最后约 2.5s）；空/未传则不加 */
   ctaText?: string;
@@ -28,10 +28,9 @@ export function buildComplianceOverlays(opts: ComplianceOverlayOpts, totalDurati
   const out: ComplianceOverlay[] = [];
   const total = Math.max(totalDuration, 0.1);
 
-  if (opts.aiDisclosure) {
-    const text = (opts.disclosureText || "AI 生成 · 广告").trim();
-    if (text) out.push({ text, style: "title", startTime: 0, endTime: total });
-  }
+  // 邀请内测的成片统一强制显式标识，不能依赖各个前端入口是否记得传开关。
+  const disclosure = (opts.disclosureText || "AI生成/辅助").trim() || "AI生成/辅助";
+  out.push({ text: disclosure, style: "disclosure", startTime: 0, endTime: total });
 
   const cta = (opts.ctaText || "").trim();
   if (cta) {

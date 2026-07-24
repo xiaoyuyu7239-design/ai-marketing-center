@@ -3,10 +3,9 @@ import type { NamespaceMessages } from "../config";
 // settings 命名空间词条（zh 为原文，en 为翻译）
 export const settings: NamespaceMessages = {
   zh: {
-    backHome: "返回首页",
-    pageTitle: "设置",
-    pageSubtitle:
-      "配置 AI 服务后即可开始生成带货视频。需要配置 LLM（生成脚本）+ 至少一个 AI 平台（生成图片/视频）。",
+    backHome: "返回创作台",
+    pageTitle: "店铺与创作偏好",
+    pageSubtitle: "完善一次，后续创作会自动带入你的店铺资料和发布习惯。",
 
     // 新手一键接入 Atlas
     oneKeyTitle: "新手推荐 · 一个 Key 全搞定",
@@ -17,6 +16,8 @@ export const settings: NamespaceMessages = {
     oneKeyGetKey: "没有 Key？前往 Atlas Cloud 获取 →",
 
     // 标签页
+    tabMerchant: "商家信息",
+    tabReminders: "发布提醒",
     tabProviders: "AI 平台",
     tabLlm: "LLM 配置",
     tabCharacters: "出镜人物",
@@ -169,10 +170,9 @@ export const settings: NamespaceMessages = {
     brandOutroTip: "片尾文字会叠加在品牌色背景上展示",
   },
   en: {
-    backHome: "Back to home",
-    pageTitle: "Settings",
-    pageSubtitle:
-      "Configure your AI services to start generating commerce videos. You'll need an LLM (for scripts) plus at least one AI platform (for images/video).",
+    backHome: "Back to workspace",
+    pageTitle: "Store & creative preferences",
+    pageSubtitle: "Set it up once and future creations will automatically use your store profile and publishing habits.",
 
     // One-key Atlas setup for newcomers
     oneKeyTitle: "Recommended · One key does it all",
@@ -183,6 +183,8 @@ export const settings: NamespaceMessages = {
     oneKeyGetKey: "No key? Get one from Atlas Cloud →",
 
     // Tabs
+    tabMerchant: "Store profile",
+    tabReminders: "Publishing reminders",
     tabProviders: "AI platforms",
     tabLlm: "LLM config",
     tabCharacters: "Characters",

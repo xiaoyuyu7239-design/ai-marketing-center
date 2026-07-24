@@ -1,6 +1,6 @@
 # 生成库存
 
-**路由**: `/products`  
+**路由**: `/products`
 **文件**: `src/app/products/page.tsx` → `前端/生成库存/page.tsx`
 
 ## 功能

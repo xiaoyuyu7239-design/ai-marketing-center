@@ -1,0 +1,12 @@
+{
+  "name": "clipforge-matting",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "独立本地图像子工具（抠图、合成、人脸风险检查）",
+  "dependencies": {
+    "@imgly/background-removal-node": "^1.4.5",
+    "onnxruntime-node": "~1.17.0",
+    "sharp": "^0.35.3"
+  }
+}

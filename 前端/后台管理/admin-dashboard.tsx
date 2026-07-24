@@ -37,24 +37,32 @@ type EndpointKey = "primary" | "fallback";
 type AdminApiPath = "/api/admin/agents" | "/api/admin/prompts" | "/api/admin/model-evals" | "/api/admin/runs";
 
 const EMPTY_STATE: AgentStrategyState = {
+  strategyRevision: 0,
   onlineVersion: "",
   draftVersion: "",
   publishedAt: "",
   agents: [],
+  draftAgents: [],
+  previousAgents: {},
   prompts: [],
   runs: [],
   evals: [],
+  audit: [],
 };
 
 function mergeState(current: AgentStrategyState, patch: Partial<AgentStrategyState>): AgentStrategyState {
   return {
+    strategyRevision: patch.strategyRevision ?? current.strategyRevision,
     onlineVersion: patch.onlineVersion ?? current.onlineVersion,
     draftVersion: patch.draftVersion ?? current.draftVersion,
     publishedAt: patch.publishedAt ?? current.publishedAt,
     agents: patch.agents ?? current.agents,
+    draftAgents: patch.draftAgents ?? current.draftAgents,
+    previousAgents: patch.previousAgents ?? current.previousAgents,
     prompts: patch.prompts ?? current.prompts,
     runs: patch.runs ?? current.runs,
     evals: patch.evals ?? current.evals,
+    audit: patch.audit ?? current.audit,
   };
 }
 
@@ -127,13 +135,28 @@ function EndpointEditor({
           <Input value={endpoint.baseUrl} onChange={(e) => onChange({ baseUrl: e.target.value })} className="font-mono text-xs" />
         </label>
         <label className="space-y-1.5 text-xs text-muted-foreground sm:col-span-2">
-          API Key
-          <Input value={endpoint.apiKey} onChange={(e) => onChange({ apiKey: e.target.value })} className="font-mono text-xs" />
+          secretRef
+          <Input value={endpoint.secretRef} onChange={(e) => onChange({ secretRef: e.target.value as ModelEndpointConfig["secretRef"] })} className="font-mono text-xs" />
         </label>
         <label className="space-y-1.5 text-xs text-muted-foreground sm:col-span-2">
-          visionModel
+          visionModel（生产须为空或与 model 相同）
           <Input value={endpoint.visionModel ?? ""} onChange={(e) => onChange({ visionModel: e.target.value || undefined })} className="font-mono text-xs" />
         </label>
+        <label className="space-y-1.5 text-xs text-muted-foreground sm:col-span-2">
+          供应商不可变 deploymentRevision
+          <Input value={endpoint.deploymentRevision ?? ""} onChange={(e) => onChange({ deploymentRevision: e.target.value || undefined })} className="font-mono text-xs" />
+        </label>
+        <label className="space-y-1.5 text-xs text-muted-foreground">
+          revisionEvidenceFile
+          <Input value={endpoint.revisionEvidenceFile ?? ""} onChange={(e) => onChange({ revisionEvidenceFile: e.target.value || undefined })} className="font-mono text-xs" />
+        </label>
+        <label className="space-y-1.5 text-xs text-muted-foreground">
+          revisionEvidenceSha256
+          <Input value={endpoint.revisionEvidenceSha256 ?? ""} onChange={(e) => onChange({ revisionEvidenceSha256: e.target.value || undefined })} className="font-mono text-xs" />
+        </label>
+        <p className="text-[11px] text-muted-foreground sm:col-span-2">
+          证据文件必须放在服务端 HUIMAI_MODEL_REVISION_EVIDENCE_DIR；生产预检会逐字节核对 SHA-256，浮动别名不会放行。
+        </p>
       </div>
     </div>
   );
@@ -859,7 +882,7 @@ export function RunsWorkspace() {
                   </td>
                   <td className="max-w-64 px-4 py-3 text-xs text-destructive">{run.errorReason || "-"}</td>
                   <td className="px-4 py-3">{run.latencyMs} ms</td>
-                  <td className="px-4 py-3">${run.costEstimateUsd.toFixed(4)}</td>
+                  <td className="px-4 py-3">{run.costUsd == null ? "未知" : `$${run.costUsd.toFixed(4)}`}</td>
                 </tr>
               ))}
             </tbody>

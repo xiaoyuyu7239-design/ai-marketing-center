@@ -3,7 +3,6 @@
  * 包含经典爆款脚本结构，适用于手机配件、智能设备、电脑外设、家电等
  */
 
-import type { Shot } from "@backend/db/schema";
 import type { ScriptTemplate } from "./beauty";
 
 export const techTemplates: ScriptTemplate[] = [

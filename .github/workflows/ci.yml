@@ -1,5 +1,4 @@
-# CI 流水线：每次 push / PR 自动跑 lint + 单测 + 生产构建
-# 对应本地命令：pnpm lint / pnpm test / pnpm build（三步全绿才算通过）
+# CI 流水线：每次 push / PR 自动跑 lint + 类型 + 单测 + 生产构建
 name: CI
 
 on:
@@ -20,6 +19,7 @@ jobs:
     # CI 只做 lint/test/build，不打包 Electron——跳过 Electron 二进制下载(~150MB)，保持安装快
     env:
       ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+      HUIMAI_CODE_VERSION: ${{ github.sha }}
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -40,8 +40,17 @@ jobs:
       - name: 代码规范检查
         run: pnpm lint
 
+      - name: TypeScript 全量类型检查
+        run: pnpm exec tsc --noEmit --incremental false
+
       - name: 单元测试
         run: pnpm test
+
+      - name: 发布候选仓库边界检查
+        run: node scripts/stage-release-candidate.mjs --require-git-tracked
+
+      - name: 发布源码边界检查
+        run: node scripts/verify-release-source.mjs --require-git-tracked
 
       - name: 生产构建
         run: pnpm build

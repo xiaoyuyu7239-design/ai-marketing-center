@@ -3,7 +3,6 @@
  * 包含经典爆款脚本结构，适用于女装、男装、鞋子、包包、配饰等
  */
 
-import type { Shot } from "@backend/db/schema";
 import type { ScriptTemplate } from "./beauty";
 
 export const fashionTemplates: ScriptTemplate[] = [

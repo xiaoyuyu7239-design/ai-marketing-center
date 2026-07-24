@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { eq, desc } from "drizzle-orm";
+import { and, eq, desc } from "drizzle-orm";
 import { getDb } from "@backend/db";
 import { scripts as scriptsTable, projects } from "@backend/db/schema";
 import { splitNarrationIntoShots } from "@backend/core/script/script-import";
+import { requireMerchant } from "@backend/core/auth/require-merchant";
 
 const SAFE_ID = /^[a-zA-Z0-9\-]+$/;
 
@@ -12,6 +13,8 @@ const SAFE_ID = /^[a-zA-Z0-9\-]+$/;
  * body: { script: string, title?: string }
  */
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const auth = await requireMerchant(req);
+  if ("error" in auth) return auth.error;
   const { id } = await params;
   if (!id || !SAFE_ID.test(id)) return NextResponse.json({ error: "无效的项目ID" }, { status: 400 });
 
@@ -25,7 +28,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   if (text.length < 2) return NextResponse.json({ error: "请提供脚本文案" }, { status: 400 });
 
   const db = getDb();
-  const [project] = await db.select().from(projects).where(eq(projects.id, id));
+  const [project] = await db
+    .select()
+    .from(projects)
+    .where(and(eq(projects.id, id), eq(projects.merchantId, auth.merchant.id)));
   if (!project) return NextResponse.json({ error: "项目不存在" }, { status: 404 });
 
   const shots = splitNarrationIntoShots(text);

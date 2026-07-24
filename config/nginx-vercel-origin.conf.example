@@ -1,0 +1,103 @@
+# Vercel external-rewrite origin for the existing persistent Huimai runtime.
+# Install as /etc/nginx/sites-available/huimai-vercel-origin after replacing
+# the certificate paths produced by certbot.
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name 124.220.90.186;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/huimai-vercel-acme;
+        default_type text/plain;
+        try_files $uri =404;
+    }
+
+    # Temporary safe preview while the cloud firewall resets public 443.
+    # Never forward credentials or any write request over this HTTP hop.
+    location ^~ /api/ {
+        if ($http_x_vercel_id = "") { return 404; }
+        if ($request_method !~ ^(GET|HEAD)$) { return 405; }
+        add_header Cache-Control "no-store" always;
+        add_header Retry-After "300" always;
+        return 503;
+    }
+
+    location / {
+        if ($http_x_vercel_id = "") { return 404; }
+        if ($request_method !~ ^(GET|HEAD)$) { return 405; }
+        include /etc/nginx/snippets/huimai-vercel-readonly-proxy.inc;
+    }
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name 124.220.90.186;
+
+    ssl_certificate /etc/letsencrypt-ip/live/124.220.90.186/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt-ip/live/124.220.90.186/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:HuimaiVercelOriginTLS:10m;
+    ssl_session_timeout 1d;
+
+    access_log /var/log/nginx/huimai-vercel-origin.access.log;
+    error_log /var/log/nginx/huimai-vercel-origin.error.log warn;
+
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header X-Robots-Tag "noindex, nofollow" always;
+
+    client_max_body_size 2m;
+    client_body_buffer_size 256k;
+    client_body_timeout 30s;
+    client_body_temp_path /srv/huimai/nginx-body 1 2;
+
+    proxy_intercept_errors on;
+    error_page 502 503 504 =503 /maintenance.html;
+
+    # The source address is not the security boundary. Require Vercel's request
+    # marker before reaching the application; app authentication remains active.
+    if ($http_x_vercel_id = "") { return 404; }
+
+    location = /maintenance.html {
+        root /var/www/huimai-bootstrap;
+        internal;
+        add_header Cache-Control "no-store" always;
+        add_header Retry-After "300" always;
+        add_header X-Robots-Tag "noindex, nofollow" always;
+    }
+
+    location = /api/upload {
+        client_max_body_size 81m;
+        limit_conn huimai_upload_conn 4;
+        limit_req zone=huimai_upload_rate burst=10 nodelay;
+        include /etc/nginx/snippets/huimai-vercel-proxy.inc;
+    }
+
+    location = /api/products/upload {
+        client_max_body_size 81m;
+        limit_conn huimai_upload_conn 4;
+        limit_req zone=huimai_upload_rate burst=10 nodelay;
+        include /etc/nginx/snippets/huimai-vercel-proxy.inc;
+    }
+
+    location ~ ^/api/project/[a-zA-Z0-9-]+/bgm$ {
+        client_max_body_size 21m;
+        limit_conn huimai_upload_conn 4;
+        limit_req zone=huimai_upload_rate burst=10 nodelay;
+        include /etc/nginx/snippets/huimai-vercel-proxy.inc;
+    }
+
+    location ~ ^/api/project/[a-zA-Z0-9-]+/materials$ {
+        client_max_body_size 161m;
+        limit_conn huimai_upload_conn 4;
+        limit_req zone=huimai_upload_rate burst=10 nodelay;
+        include /etc/nginx/snippets/huimai-vercel-proxy.inc;
+    }
+
+    location / {
+        include /etc/nginx/snippets/huimai-vercel-proxy.inc;
+    }
+}

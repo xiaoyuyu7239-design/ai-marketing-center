@@ -32,11 +32,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/xiaoyuyu7239-design/ai-marketing-center",
+    "url": "https://github.com/xixihhhh/clipforge",
     "directory": "mcp"
   },
-  "homepage": "https://github.com/xiaoyuyu7239-design/ai-marketing-center/tree/main/mcp",
-  "bugs": "https://github.com/xiaoyuyu7239-design/ai-marketing-center/issues",
+  "homepage": "https://github.com/xixihhhh/clipforge/tree/main/mcp",
+  "bugs": "https://github.com/xixihhhh/clipforge/issues",
   "license": "AGPL-3.0",
   "author": "xiaoyuyu7239-design"
 }

@@ -6,6 +6,9 @@
  * 设计：本服务是 ClipForge HTTP API 的薄封装（复用其全部编排：DB / FFmpeg / 免费 TTS / 免费素材），
  * 通过 stdio 与客户端通信。只有「生成脚本」需要一个 LLM Key（其余 Openverse 素材 + Edge TTS 全程免 Key）。
  *
+ * ⚠️ 多租户改造后 API 需要商家登录。本机单人使用请在启动实例时开启单用户模式：
+ *   CLIPFORGE_SINGLE_USER=1 pnpm dev   （多商家部署严禁开启）
+ *
  * 环境变量：
  *   CLIPFORGE_BASE_URL     ClipForge 实例地址（默认 http://localhost:3000，需先 `pnpm dev` / `pnpm start`）
  *   CLIPFORGE_LLM_BASE_URL LLM 接口（OpenAI 兼容，如 https://api.atlascloud.ai/v1）

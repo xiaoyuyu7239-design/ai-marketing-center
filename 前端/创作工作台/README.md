@@ -1,7 +1,7 @@
 # 创作工作台
 
-**路由**: `/project/agent`  
-**文件**: `src/app/project/agent/page.tsx` → `前端/创作工作台/page.tsx`  
+**路由**: `/project/agent`
+**文件**: `src/app/project/agent/page.tsx` → `前端/创作工作台/page.tsx`
 **行数**: 934 行（项目最大页面）
 
 ## 功能
@@ -19,4 +19,3 @@
 ## 添加新功能
 - 新设置选项：在 `qualityOptions` / `aspectRatioOptions` / `targetDurationOptions` 中添加
 - 新输入方式：在 `textarea` 区域添加
-

@@ -50,6 +50,153 @@
       "when": 1783331803733,
       "tag": "0006_aberrant_lenny_balinger",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1783620239794,
+      "tag": "0007_far_sage",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1783622750899,
+      "tag": "0008_watery_secret_warriors",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1783648909355,
+      "tag": "0009_spicy_puff_adder",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1783650796192,
+      "tag": "0010_clammy_warlock",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1783833434382,
+      "tag": "0011_local_store_profile",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1783837887431,
+      "tag": "0012_content_diagnosis",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "6",
+      "when": 1783840211177,
+      "tag": "0013_video_retros",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "6",
+      "when": 1783840803174,
+      "tag": "0014_weekly_reports",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "6",
+      "when": 1783871492056,
+      "tag": "0015_publish_reminders",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "6",
+      "when": 1784182808451,
+      "tag": "0016_invite_beta_compliance",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "6",
+      "when": 1784183398011,
+      "tag": "0017_aigc_credits",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "6",
+      "when": 1784184346837,
+      "tag": "0018_persistent_jobs",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "6",
+      "when": 1784187280549,
+      "tag": "0019_workflow_generation_usage",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "6",
+      "when": 1784188042658,
+      "tag": "0020_compose_paid_tts_usage",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "6",
+      "when": 1784190031742,
+      "tag": "0021_golden_media_eval_jobs",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "6",
+      "when": 1784190475573,
+      "tag": "0022_generation_item_leases",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "6",
+      "when": 1784193778763,
+      "tag": "0023_golden_tts_one_shot",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "6",
+      "when": 1784280087594,
+      "tag": "0024_persistent_motion_video_jobs",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "6",
+      "when": 1784280487562,
+      "tag": "0025_motion_asset_assessments",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "6",
+      "when": 1784284278767,
+      "tag": "0026_motion_job_schema_upgrade",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "6",
+      "when": 1784440463992,
+      "tag": "0027_rag_samples",
+      "breakpoints": true
     }
   ]
 }

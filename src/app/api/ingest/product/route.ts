@@ -7,22 +7,26 @@ import { mkdir, writeFile } from "fs/promises";
 import { join, basename } from "path";
 import { parseProductFromHtml } from "@backend/core/stock/product-ingest";
 import { inferExtension, MAX_DOWNLOAD_BYTES } from "@backend/providers/stock-types";
-import { safeFetch } from "@backend/shared/ssrf-guard";
+import { readResponseBuffer, safeFetchPinned } from "@backend/shared/ssrf-guard";
+import { requireMerchant } from "@backend/core/auth/require-merchant";
+import { ensureStorageCapacity } from "@backend/core/security/storage-guard";
+import { consumeExpensiveRouteRateLimit, EXPENSIVE_RATE_LIMIT_PRESETS, rateLimitResponse } from "@backend/core/security/rate-limit";
 
 const UA = "Mozilla/5.0 (compatible; ClipForge/1.0; +https://github.com/xixihhhh/clipforge)";
 const MAX_HTML_BYTES = 3 * 1024 * 1024;
 const MAX_IMAGES = 3;
 
-/** 经 SSRF 防护下载一张商品图到本地（safeFetch 逐跳校验，杜绝 og:image 指向内网）。 */
+/** 经 SSRF 防护下载一张商品图到本地（逐跳校验并钉定 DNS，杜绝 og:image 指向内网）。 */
 async function safeDownloadImage(url: string, destDir: string, base: string): Promise<string> {
-  const res = await safeFetch(url, { headers: { "User-Agent": UA } });
+  const res = await safeFetchPinned(url, {
+    headers: { "User-Agent": UA },
+    signal: AbortSignal.timeout(20_000),
+  });
   if (!res.ok) throw new Error(`图片下载失败 ${res.status}`);
   const ct = res.headers.get("content-type");
-  const declared = Number(res.headers.get("content-length") || 0);
-  if (declared && declared > MAX_DOWNLOAD_BYTES) throw new Error("图片体积超限");
-  const buf = Buffer.from(await res.arrayBuffer());
-  if (buf.byteLength > MAX_DOWNLOAD_BYTES) throw new Error("图片体积超限");
-  const filePath = join(destDir, `${base}.${inferExtension(url, ct, "image")}`);
+  const buf = await readResponseBuffer(res, MAX_DOWNLOAD_BYTES);
+  await ensureStorageCapacity(buf.byteLength);
+  const filePath = join(/* turbopackIgnore: true */ destDir, `${base}.${inferExtension(url, ct, "image")}`);
   await writeFile(filePath, buf);
   return filePath;
 }
@@ -33,6 +37,13 @@ async function safeDownloadImage(url: string, destDir: string, base: string): Pr
  * 抓取商品页 → 解析 标题/价格/描述/图 → （可选）建项目落地，前端/MCP 拿到 projectId 直接走脚本→出片。
  */
 export async function POST(req: NextRequest) {
+  const auth = await requireMerchant(req);
+  if ("error" in auth) return auth.error;
+  const limit = consumeExpensiveRouteRateLimit(req, auth.merchant.id, "product:ingest", {
+    ...EXPENSIVE_RATE_LIMIT_PRESETS.auxiliaryModel,
+    merchantSustained: 15,
+  });
+  if (!limit.allowed) return rateLimitResponse(limit, "导入过于频繁，请稍后再试");
   let body: Record<string, unknown>;
   try {
     body = await req.json();
@@ -49,20 +60,18 @@ export async function POST(req: NextRequest) {
   // 抓取 HTML（描述性 UA + 超时 + 体积上限）
   let html: string;
   try {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 15000);
-    // safeFetch：禁内网/元数据地址 + 逐跳校验重定向（防 SSRF）
-    const res = await safeFetch(url, {
+    // 禁内网/元数据地址，逐跳校验重定向并钉定 DNS（防 SSRF / DNS rebinding）。
+    const res = await safeFetchPinned(url, {
       headers: { "User-Agent": UA, Accept: "text/html,application/xhtml+xml,*/*" },
-      signal: ctrl.signal,
-    }).finally(() => clearTimeout(timer));
+      signal: AbortSignal.timeout(15_000),
+    });
     if (!res.ok) return NextResponse.json({ error: `抓取商品页失败：HTTP ${res.status}` }, { status: 502 });
     const ct = res.headers.get("content-type") || "";
     if (!/text\/html|application\/xhtml/i.test(ct)) {
       return NextResponse.json({ error: "该链接不是网页（非 HTML），无法解析" }, { status: 415 });
     }
-    const buf = Buffer.from(await res.arrayBuffer());
-    html = buf.subarray(0, MAX_HTML_BYTES).toString("utf8");
+    const buf = await readResponseBuffer(res, MAX_HTML_BYTES);
+    html = buf.toString("utf8");
   } catch (e) {
     const msg = e instanceof Error && e.name === "AbortError" ? "抓取超时" : e instanceof Error ? e.message : String(e);
     return NextResponse.json({ error: `抓取商品页失败：${msg}` }, { status: 502 });
@@ -81,6 +90,7 @@ export async function POST(req: NextRequest) {
   const [proj] = await db
     .insert(projects)
     .values({
+      merchantId: auth.merchant.id,
       name,
       contentType: "product",
       productName: name,

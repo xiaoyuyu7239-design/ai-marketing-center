@@ -9,7 +9,7 @@ ClipForge produces a finished vertical short video end to end. You drive it thro
 
 ## Prerequisites
 
-1. A running ClipForge instance: `pnpm dev` or `pnpm start` (default `http://localhost:3000`).
+1. A running ClipForge instance in single-user mode: `CLIPFORGE_SINGLE_USER=1 pnpm dev` or `CLIPFORGE_SINGLE_USER=1 pnpm start` (default `http://localhost:3000`). The API now requires a merchant session; single-user mode bypasses login for local single-person use (never enable it on a multi-merchant deployment).
 2. For script generation, an OpenAI-compatible LLM (set `CLIPFORGE_LLM_BASE_URL` / `CLIPFORGE_LLM_API_KEY` / `CLIPFORGE_LLM_MODEL`). Local/free options exist (Ollama, Pollinations).
 3. Footage and voiceover are free and keyless by default; optional Pexels/Pixabay keys add more stock.
 

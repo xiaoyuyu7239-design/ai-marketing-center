@@ -17,9 +17,9 @@ test.describe("冒烟测试", () => {
     await expect(page.getByRole("heading", { name: "一键绘成，即刻开卖" })).toBeVisible();
   });
 
-  test("商品库页面可以加载", async ({ page }) => {
+  test("生成库存页面可以加载", async ({ page }) => {
     await page.goto("/products");
-    await expect(page.locator("text=商品库")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "生成库存" })).toBeVisible();
   });
 
   test("新建项目流程可以到达表单", async ({ page }) => {
@@ -29,13 +29,14 @@ test.describe("冒烟测试", () => {
     await expect(page.locator("text=视频模式")).toBeVisible();
   });
 
-  test("设置页可以切换 Tab", async ({ page }) => {
+  test("设置页只展示已接入用户链路的偏好", async ({ page }) => {
     await page.goto("/settings");
-    await expect(page.locator("text=AI 平台")).toBeVisible();
-    await page.click("text=出镜人物");
-    await expect(page.locator("text=添加出镜人物")).toBeVisible();
-    await page.click("text=品牌设置");
-    await expect(page.locator("text=店铺名称")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "店铺与创作偏好" })).toBeVisible();
+    await expect(page.getByRole("tab", { name: "商家信息" })).toBeVisible();
+    await expect(page.getByRole("tab", { name: "发布提醒" })).toBeVisible();
+    await expect(page.getByText("生成策略由工作人员统一维护")).toHaveCount(0);
+    await expect(page.getByRole("tab", { name: "出镜人物" })).toHaveCount(0);
+    await expect(page.getByRole("tab", { name: "品牌设置" })).toHaveCount(0);
   });
 
   test("批量出片页面可以加载", async ({ page }) => {

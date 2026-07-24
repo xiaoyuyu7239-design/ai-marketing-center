@@ -1,6 +1,6 @@
 # 主题创作
 
-**路由**: `/project/topic`  
+**路由**: `/project/topic`
 **文件**: `src/app/project/topic/page.tsx` → `前端/主题创作/page.tsx`
 
 ## 功能
@@ -13,4 +13,3 @@
 
 ## 添加新功能
 - 新内容类型：扩展 topic 分类
-

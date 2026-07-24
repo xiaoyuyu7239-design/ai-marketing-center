@@ -1,6 +1,6 @@
 # 设置中心
 
-**路由**: `/settings`  
+**路由**: `/settings`
 **文件**: `src/app/settings/page.tsx` → `前端/设置中心/page.tsx`
 
 ## 功能
@@ -15,4 +15,3 @@
 ## 添加新功能
 - 新设置 Tab：在 `tabs` 切换区添加
 - 新品牌配置项：扩展 `brandStore`
-

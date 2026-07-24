@@ -52,7 +52,7 @@ export const batch: NamespaceMessages = {
     livePresenterHint: "「真人出镜」不渲染数字人：需在合成步骤自备真人素材，或只用 AI 生成中远景人物场景。没有真人素材时，建议改用「产品特写」或「场景演示」。",
     scriptStyleLabel: "脚本风格",
     durationLabel: "目标时长",
-    autoComposeLabel: "生成脚本后自动配画面 + 合成成片（免费，全程 0 Key）",
+    autoComposeLabel: "生成脚本后自动配免费素材与配音，再提交合成（无需自备 Key）",
     productCardLabel: "左下角叠商品卡贴片（商品图+名+价+购买引导）",
     // 生成进度
     progressLabel: "生成进度",
@@ -117,7 +117,7 @@ export const batch: NamespaceMessages = {
     livePresenterHint: "Live-presenter mode renders no digital human: bring your own real-person footage at the compose step, or use AI mid/long-shot person scenes only. No footage? Switch to Product close-up or Scene demo.",
     scriptStyleLabel: "Script style",
     durationLabel: "Target duration",
-    autoComposeLabel: "Auto-fill footage + render the video after scripting (free, 0 API key)",
+    autoComposeLabel: "After scripting, add free stock media and voiceover, then submit rendering (no personal API key)",
     productCardLabel: "Overlay a product card (image + name + price + buy CTA)",
     // 生成进度
     progressLabel: "Progress",

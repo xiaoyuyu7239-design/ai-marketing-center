@@ -1,8 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { eq, desc } from "drizzle-orm";
+import { and, eq, desc } from "drizzle-orm";
 import { getDb } from "@backend/db";
 import { scripts as scriptsTable, projects, type Shot } from "@backend/db/schema";
 import { translateShots, defaultVoiceForLang, langName } from "@backend/script-engine/translate";
+import { requireMerchant } from "@backend/core/auth/require-merchant";
+import { consumeExpensiveRouteRateLimit, EXPENSIVE_RATE_LIMIT_PRESETS, rateLimitResponse } from "@backend/core/security/rate-limit";
+import { runMeteredAgentOperation, QuotaExceededError } from "@backend/core/auth/usage";
 
 const SAFE_ID = /^[a-zA-Z0-9\-]+$/;
 
@@ -10,9 +13,13 @@ const SAFE_ID = /^[a-zA-Z0-9\-]+$/;
  * POST /api/project/[id]/dub —— 把当前选中脚本翻成目标语种，存为新选中脚本版本（译制版）。
  * 之后用返回的 recommendedVoice 走正常 compose，即得换语种配音版（出海：同片发不同市场）。
  * 画面检索字段保持原文，译制版沿用同样画面，只换声音/字幕。
- * body: { targetLang: string, llmConfig: {baseUrl,apiKey,model}, title? }
+ * body: { targetLang: string, title? }；模型和密钥只读取服务端已发布的 script Agent 策略。
  */
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const auth = await requireMerchant(req);
+  if ("error" in auth) return auth.error;
+  const limit = consumeExpensiveRouteRateLimit(req, auth.merchant.id, "project:dub", EXPENSIVE_RATE_LIMIT_PRESETS.auxiliaryModel);
+  if (!limit.allowed) return rateLimitResponse(limit, "多语言配音准备请求过于频繁，请稍后再试");
   const { id } = await params;
   if (!id || !SAFE_ID.test(id)) return NextResponse.json({ error: "无效的项目ID" }, { status: 400 });
 
@@ -24,13 +31,11 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   }
   const targetLang = typeof body.targetLang === "string" ? body.targetLang.trim() : "";
   if (!targetLang) return NextResponse.json({ error: "请指定 targetLang（如 en/ja/ko/es）" }, { status: 400 });
-  const llmConfig = body.llmConfig as { baseUrl?: string; apiKey?: string; model?: string } | undefined;
-  if (!llmConfig?.baseUrl || !llmConfig?.model) {
-    return NextResponse.json({ error: "请配置 LLM 参数（baseUrl、model；本地/免费端点 apiKey 可留空）" }, { status: 400 });
-  }
-
   const db = getDb();
-  const [project] = await db.select().from(projects).where(eq(projects.id, id));
+  const [project] = await db
+    .select()
+    .from(projects)
+    .where(and(eq(projects.id, id), eq(projects.merchantId, auth.merchant.id)));
   if (!project) return NextResponse.json({ error: "项目不存在" }, { status: 404 });
 
   const rows = await db.select().from(scriptsTable).where(eq(scriptsTable.projectId, id));
@@ -41,12 +46,20 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
   let translated: Shot[];
   try {
-    translated = await translateShots(shots, targetLang, {
-      baseUrl: llmConfig.baseUrl,
-      apiKey: llmConfig.apiKey ?? "",
-      model: llmConfig.model,
-    });
+    translated = await runMeteredAgentOperation(
+      auth.merchant.id,
+      "script",
+      `${id}:dub:${targetLang}`,
+      (config) => translateShots(shots, targetLang, {
+        baseUrl: config.baseUrl,
+        apiKey: config.apiKey,
+        model: config.model,
+      })
+    );
   } catch (e) {
+    if (e instanceof QuotaExceededError) {
+      return NextResponse.json({ error: e.message }, { status: 402 });
+    }
     return NextResponse.json({ error: e instanceof Error ? e.message : "翻译失败" }, { status: 502 });
   }
   const totalDuration = translated.reduce((sum, sh) => sum + sh.duration, 0);

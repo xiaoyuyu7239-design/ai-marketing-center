@@ -1,5 +1,6 @@
-# 发版流水线：push 形如 vX.Y.Z 的 tag 时，在 mac + windows runner 上分别打桌面安装包，
+# 稳定桌面版流水线：push 形如 vX.Y.Z 的非预发布 tag 时，在 mac + windows runner 上分别打包，
 # 并把 .dmg / .exe 上传到对应的 GitHub Release（即"别人一键下载即用"）。
+# 邀请内测的 vX.Y.Z-beta.N 不是桌面 GA，不运行本 job。
 name: Release Desktop
 
 on:
@@ -15,6 +16,9 @@ concurrency:
 
 jobs:
   build:
+    if: ${{ !contains(github.ref_name, '-') }}
+    env:
+      HUIMAI_CODE_VERSION: ${{ github.sha }}
     strategy:
       fail-fast: false # 一个平台失败不影响另一个平台继续出包
       matrix:
@@ -24,6 +28,10 @@ jobs:
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
+
+      - name: 校验稳定版标签与包版本
+        shell: bash
+        run: node scripts/verify-release-identity.mjs --tag "$GITHUB_REF_NAME" --stable-only
 
       - name: 安装 pnpm
         uses: pnpm/action-setup@v4
@@ -38,6 +46,9 @@ jobs:
       - name: 安装依赖
         run: pnpm install --frozen-lockfile
 
+      - name: 发布候选仓库边界检查
+        run: node scripts/stage-release-candidate.mjs --require-git-tracked
+
       - name: 打包桌面安装包（mac=.dmg / win=.exe）
         run: pnpm dist
 
@@ -49,6 +60,7 @@ jobs:
             release/*.exe
           fail_on_unmatched_files: false
           draft: true
+          prerelease: false
           # 双语发布说明（中文优先 + 英文），国际化友好；品牌统一为 AI Marketing Center、数据目录与 build.productName 一致
           body: |
             AI Marketing Center 桌面版 —— 双击即用，内置 ffmpeg / sqlite，无需安装 Node。

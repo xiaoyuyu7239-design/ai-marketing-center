@@ -3,7 +3,7 @@ import { mkdtemp, writeFile, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import { classifyMaterial, scoreByFilename, scanLocalMaterials } from "@backend/providers/local-stock";
-import { downloadStockFile } from "@backend/providers/stock-types";
+import { downloadStockFile, persistedAssetTypeForStockSource } from "@backend/providers/stock-types";
 import { searchStock } from "@backend/providers/stock-registry";
 
 let dir: string;
@@ -70,5 +70,12 @@ describe("downloadStockFile 本地复制分支", () => {
     } finally {
       await rm(out, { recursive: true, force: true });
     }
+  });
+});
+
+describe("本地自有素材的落库语义", () => {
+  it("local 记为 user_upload，不触发第三方 credits 来源页门禁", () => {
+    expect(persistedAssetTypeForStockSource("local")).toBe("user_upload");
+    expect(persistedAssetTypeForStockSource("openverse")).toBe("stock_footage");
   });
 });

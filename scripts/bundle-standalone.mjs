@@ -1,13 +1,14 @@
 // 构建后补齐 standalone 自包含资源（next build 的 standalone 默认不含 static/public），
 // 拷贝迁移 SQL，并把 standalone 里的 better-sqlite3 副本换成 Electron ABI 的预编译二进制。
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { execSync } from "child_process";
 import { createRequire } from "module";
-import { join } from "path";
+import { dirname, join } from "path";
 
 const require = createRequire(import.meta.url);
 const root = process.cwd();
 const standalone = join(root, ".next", "standalone");
+const webRuntimeOnly = process.argv.includes("--web-runtime");
 
 if (!existsSync(standalone)) {
   console.error("✗ 未找到 .next/standalone，请先 next build（需 next.config 开启 output:'standalone'）");
@@ -18,6 +19,7 @@ const copies = [
   [join(root, ".next", "static"), join(standalone, ".next", "static")],
   [join(root, "public"), join(standalone, "public")],
   [join(root, "drizzle"), join(standalone, "drizzle")],
+  [join(root, "tools", "matting"), join(standalone, "tools", "matting")],
 ];
 
 for (const [from, to] of copies) {
@@ -25,8 +27,11 @@ for (const [from, to] of copies) {
     console.warn(`⚠ 跳过(源不存在): ${from}`);
     continue;
   }
-  mkdirSync(to, { recursive: true });
-  cpSync(from, to, { recursive: true });
+  // Node cp 默认会把相对软链接改写成指向源工作树的绝对路径，发布后立即断裂/越界。
+  // 先清理本次构建的目标副本，再保存 npm .bin 的相对链接文本。
+  rmSync(to, { recursive: true, force: true });
+  mkdirSync(dirname(to), { recursive: true });
+  cpSync(from, to, { recursive: true, verbatimSymlinks: true });
   console.log(`✓ ${from} → ${to}`);
 }
 
@@ -37,7 +42,11 @@ for (const [from, to] of copies) {
 // 打包后 App 用 Electron 内置 Node fork server.js，需匹配 Electron 的 ABI（如 Electron 42=146），
 // 否则任何 DB 路由都会因 NODE_MODULE_VERSION 不匹配而 500。直接取官方 electron-vXXX 预编译，不编译源码。
 // 注：cp/tar 等命令面向 mac/linux 构建机；Windows 打包(CI matrix)时再按平台分支。
-await rebuildBetterSqlite3ForElectron();
+if (webRuntimeOnly) {
+  console.log("✓ Web standalone 模式：保留系统 Node ABI，跳过 Electron 二进制替换");
+} else {
+  await rebuildBetterSqlite3ForElectron();
+}
 
 async function rebuildBetterSqlite3ForElectron() {
   const pnpmDir = join(standalone, "node_modules", ".pnpm");

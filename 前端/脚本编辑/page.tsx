@@ -21,6 +21,7 @@ import { BrandWheatMark } from "@frontend/components/brand-wheat-logo";
 import { SHOT_TYPE_INFO, STYLE_LABEL_KEYS } from "@backend/shared/shot-constants";
 import { StepProgressIndicator } from "@frontend/components/step-progress";
 import { pollComposition } from "@backend/shared/poll-composition";
+import { acquireComposeOperation, clearComposeOperation } from "@frontend/lib/compose-operation";
 import {
   parseStoredAgentGenerationSettings,
   projectAgentGenerationSettingsKey,
@@ -44,8 +45,13 @@ export default function ScriptPage() {
   tRef.current = t;
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
-  const workflowStepHrefs = [`/project/${id}/script`, `/project/${id}/assets`, `/project/${id}/video`, `/project/${id}/export`];
+  const workflowStepHrefs = [`/project/${id}/script`, `/project/${id}/assets`, `/project/${id}/motion`, `/project/${id}/video`, `/project/${id}/export`];
   const [selectedScript, setSelectedScript] = useState(0);
+  // AI 超时降级成模板时，工作台会把 warning 存进 sessionStorage——如实展示，别让老板把罐头模板当 AI 成稿
+  const [fallbackWarning, setFallbackWarning] = useState<string | null>(null);
+  useEffect(() => {
+    setFallbackWarning(window.sessionStorage?.getItem(`clipforge_script_warning:${id}`) ?? null);
+  }, [id]);
   const [scripts, setScripts] = useState<
     { id: string; title: string; styleType: string; totalDuration: number; shots: Shot[] }[]
   >([]);
@@ -136,9 +142,14 @@ export default function ScriptPage() {
             category: projectMeta.category,
             productDescription: projectMeta.description,
             targetDuration,
-            styleType: "auto",
+            // 脚本输出语言跟随界面语言（英文品名的商品在中文用户这里也该出中文脚本）
+            locale,
+            // 沿用老板在工作台"更多设置"里点选的内容方向，而不是写死 auto 丢掉他的选择
+            styleType: savedSettings?.styleType ?? "auto",
             videoMode: projectMeta.videoMode,
             productImages: projectMeta.productImages,
+            timeoutMs: 60000,
+            maxTokens: 5000,
           };
       const res = await fetch(endpoint, {
         method: "POST",
@@ -148,6 +159,15 @@ export default function ScriptPage() {
       if (!res.ok) {
         const e = await res.json().catch(() => ({}));
         throw new Error(e.error || t("errorGenFailedCheckLlm"));
+      }
+      // 重新生成结果如实同步兜底状态：真 AI 成功则清掉旧警告，仍是模板兜底则更新提示
+      const regenData = await res.clone().json().catch(() => ({} as { warning?: string }));
+      if (regenData?.warning) {
+        window.sessionStorage?.setItem(`clipforge_script_warning:${id}`, String(regenData.warning));
+        setFallbackWarning(String(regenData.warning));
+      } else {
+        window.sessionStorage?.removeItem(`clipforge_script_warning:${id}`);
+        setFallbackWarning(null);
       }
       await loadScripts();
     } catch (err) {
@@ -367,23 +387,37 @@ export default function ScriptPage() {
         typeof window !== "undefined" ? window.localStorage?.getItem(projectAgentGenerationSettingsKey(id)) : null
       );
       setAutoFinishStage(t("autoFinishComposing"));
+      const composePayload = {
+        freeTts: { enabled: true },
+        ...(savedSettings?.renderPreset && { renderPreset: savedSettings.renderPreset }),
+        ...(savedSettings?.resolution && { resolution: savedSettings.resolution }),
+        ...(savedSettings?.aspectRatio && { aspectRatio: savedSettings.aspectRatio }),
+      };
+      const composeOperation = acquireComposeOperation(id, "script-auto-finish", composePayload);
       const composeRes = await fetch(`/api/project/${id}/compose`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          freeTts: { enabled: true },
-          ...(savedSettings?.renderPreset && { renderPreset: savedSettings.renderPreset }),
-          ...(savedSettings?.resolution && { resolution: savedSettings.resolution }),
-          ...(savedSettings?.aspectRatio && { aspectRatio: savedSettings.aspectRatio }),
-        }),
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": composeOperation.idempotencyKey,
+        },
+        body: JSON.stringify(composePayload),
       });
-      if (!composeRes.ok) throw new Error(t("autoFinishFailed"));
+      if (!composeRes.ok) {
+        clearComposeOperation(composeOperation);
+        throw new Error(t("autoFinishFailed"));
+      }
       const data = await composeRes.json().catch(() => ({}));
-      const url = await pollComposition(id, data.compositionId, {
-        timeoutMs: 11 * 60 * 1000,
+      const compositionId = typeof data.compositionId === "string" ? data.compositionId : "";
+      if (!compositionId) throw new Error(t("autoFinishFailed"));
+      const url = await pollComposition(id, compositionId, {
+        // FFmpeg 单任务最长 10 分钟，还需给排队/TTS 留出窗口；超时只停止等待，不误报后台失败。
+        timeoutMs: 15 * 60 * 1000,
         failMessage: t("autoFinishFailed"),
-        timeoutMessage: t("autoFinishFailed"),
+        onStatus: (status) => {
+          if (status === "done" || status === "failed") clearComposeOperation(composeOperation);
+        },
       });
+      clearComposeOperation(composeOperation);
       if (!url) throw new Error(t("autoFinishFailed"));
       router.push(`/project/${id}/export`);
     } catch (err) {
@@ -492,7 +526,7 @@ export default function ScriptPage() {
             {/* 步骤胶囊在窄屏放不下，移动端隐藏（仅进度展示、非导航） */}
             <div className="hidden sm:flex items-center gap-1">
             <StepProgressIndicator
-              steps={[t("stepScript"), t("stepAssets"), t("stepVideo"), t("stepExport")]}
+              steps={[t("stepScript"), t("stepAssets"), t("stepMotion"), t("stepVideo"), t("stepExport")]}
               activeIndex={0}
               hrefs={workflowStepHrefs}
               backLabel={tc("backPrevStep")}
@@ -513,6 +547,11 @@ export default function ScriptPage() {
                   <div>
                     <h2 className="text-lg font-semibold">{t("scriptHeroTitle")}</h2>
                     <p className="mt-0.5 text-sm text-muted-foreground">{t("scriptHeroDesc")}</p>
+                    {fallbackWarning && (
+                      <p className="mt-1.5 text-sm font-medium text-amber-600 dark:text-amber-400">
+                        ⚠ {fallbackWarning}{t("fallbackRegenHint")}
+                      </p>
+                    )}
                     {currentScript && (
                       <div className="hidden">
                         <span className="rounded-full bg-muted px-2.5 py-1 text-foreground">{t("currentVersion")}</span>
@@ -543,7 +582,7 @@ export default function ScriptPage() {
                       </span>
                     </div>
                     <div className="mt-4 space-y-2.5">
-                      {currentScript.shots.slice(0, 6).map((shot, index) => {
+                      {currentScript.shots.map((shot, index) => {
                         const typeInfo = SHOT_TYPE_INFO[shot.type];
                         return (
                           <div key={shot.shotId} className="rounded-lg border border-border/50 bg-muted/10 p-3">
@@ -558,24 +597,21 @@ export default function ScriptPage() {
                                   </Badge>
                                   <span className="text-[11px] text-muted-foreground">{shot.duration}s</span>
                                 </div>
+                                {/* 分镜的主角是画面与动作，文字只是贴在画面上的点缀 */}
                                 <p className="text-sm leading-relaxed text-foreground">
-                                  {shot.voiceover || shot.description || t("scriptResultFallback")}
+                                  {shot.description || t("scriptResultFallback")}
                                 </p>
-                                {shot.description && (
-                                  <p className="mt-1.5 line-clamp-2 text-xs leading-relaxed text-muted-foreground">
-                                    {shot.description}
-                                  </p>
+                                {shot.camera && (
+                                  <p className="mt-1 text-xs text-muted-foreground">🎥 {shot.camera}</p>
+                                )}
+                                {shot.voiceover && (
+                                  <p className="mt-1 text-xs text-muted-foreground">💬 {shot.voiceover}</p>
                                 )}
                               </div>
                             </div>
                           </div>
                         );
                       })}
-                      {currentScript.shots.length > 6 && (
-                        <p className="text-xs text-muted-foreground">
-                          {t("scriptResultMore", { n: currentScript.shots.length - 6 })}
-                        </p>
-                      )}
                     </div>
                   </CardContent>
                 </Card>

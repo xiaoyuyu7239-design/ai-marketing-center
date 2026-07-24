@@ -13,7 +13,7 @@
 export interface AigcMetadataOpts {
   /** 内容制作编号（用 projectId / compositionId） */
   contentId: string;
-  /** 服务提供者名称，默认 ClipForge */
+  /** 服务提供者名称，默认绘卖AI */
   serviceProvider?: string;
 }
 
@@ -24,7 +24,7 @@ function sanitize(v: string): string {
 
 /** 生成 GB 45438 隐式标识的 ffmpeg `-metadata` 参数串（拼到合成命令尾、输出文件之前）。 */
 export function buildAigcMetadataArgs(opts: AigcMetadataOpts): string {
-  const provider = sanitize(opts.serviceProvider || "ClipForge") || "ClipForge";
+  const provider = sanitize(opts.serviceProvider || "绘卖AI") || "绘卖AI";
   const id = sanitize(opts.contentId).slice(0, 64) || "unknown";
   // 三要素：生成合成标签(AIGC=1/内容=AI生成合成) + 服务提供者 + 内容制作编号
   const triple = `AIGC=1; 内容=AI生成合成; 服务提供者=${provider}; 内容制作编号=${id}`;

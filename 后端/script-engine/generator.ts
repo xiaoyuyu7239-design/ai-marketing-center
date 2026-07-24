@@ -5,10 +5,17 @@
  */
 
 import OpenAI from "openai";
+import { createSafeOpenAIClient } from "@backend/shared/openai-client";
 import {
   SYSTEM_PROMPT,
   PRODUCT_ANALYSIS_PROMPT,
   TOPIC_SYSTEM_PROMPT,
+  CONTENT_STRATEGY_GUIDE,
+  CATEGORY_VISUAL_GUIDE,
+  PACING_GUIDE,
+  buildTrendGuide,
+  buildLocalStoreGuide,
+  MOOD_FILM_GUIDE,
   buildUserPrompt,
   buildBatchPrompt,
   buildTopicBatchPrompt,
@@ -107,12 +114,25 @@ export interface ProductAnalysisResult {
 // ==================== 工具函数 ====================
 
 /** 创建 OpenAI 客户端 */
-function createClient(config: LLMConfig): OpenAI {
-  return new OpenAI({
+function createClient(config: LLMConfig, timeoutMs?: number): OpenAI {
+  const effectiveTimeoutMs = timeoutMs ?? config.timeoutMs;
+  return createSafeOpenAIClient({
     baseURL: config.baseUrl,
     // 本地/免费 OpenAI 兼容端点（Ollama、Pollinations）无需真 Key；SDK 要求非空，缺省给占位符
     apiKey: config.apiKey || "no-key",
+    ...(effectiveTimeoutMs ? { timeout: effectiveTimeoutMs } : {}),
   });
+}
+
+/**
+ * 火山方舟「深度思考」模型默认会先输出长思维链再答，简单请求也要 12s+，常撞脚本/分析的超时墙。
+ * 带货脚本、商品分析都不需要模型"思考"，对火山 baseUrl 注入 thinking:disabled，同款接入点响应从 ~12s 降到 ~3s。
+ * 仅影响火山（ark…volces.com）；OpenAI / Ollama / Pollinations 等其它端点原样透传，不加此字段。
+ * thinking 是火山对 OpenAI 协议的扩展字段，不在 SDK 类型内，故用泛型 as 注入。
+ */
+export function arkThinkingOff<T extends object>(body: T, baseUrl: string): T {
+  const isArk = /ark\.cn-.*volces\.com|volces\.com\/api\/v3/i.test(baseUrl);
+  return isArk ? ({ ...body, thinking: { type: "disabled" } } as T) : body;
 }
 
 function providerErrorHint(config: LLMConfig, message: string): string {
@@ -149,16 +169,21 @@ function timeoutMessage(e: unknown, timeoutMs?: number) {
   return e instanceof Error ? e.message : String(e);
 }
 
-function sameLanguageHint(text: string) {
-  return text.trim() && !/[一-鿿]/.test(text)
-    ? "Write title and voiceover in the same language as the product/topic. Keep searchTerms in English."
+/** 输出语言指令：跟随界面语言（locale），不再按商品/主题文本猜测——英文品名不代表用户要英文脚本 */
+function localeHint(locale?: "zh" | "en") {
+  return locale === "en"
+    ? "Write title, description, camera and voiceover in English. Keep searchTerms in English."
     : "标题、画面描述、镜头、旁白使用中文；searchTerms 和 prompt 使用英文。";
+}
+
+/** 抖音节奏：约 1.7 秒一镜、1-3 秒混排（LLM 生成路径用；模板兜底路径仍走 splitDurations 的 4-5 镜） */
+function shotCountFor(duration: number) {
+  return Math.min(12, Math.max(7, Math.round(duration / 1.7)));
 }
 
 function quickProductPrompt(input: ScriptInput): string {
   const duration = clampInt(input.targetDuration, 12, 40, 20);
-  const shotCount = duration <= 18 ? 4 : 5;
-  const productText = `${input.productName || ""} ${input.productDescription || ""} ${input.usageAdvantage || ""}`;
+  const shotCount = shotCountFor(duration);
   const visualSource = input.videoMode === "scene_demo" ? "ai_generate" : "product_image";
   const analysis = input.productAnalysis ? `\n商品图片分析摘要：${input.productAnalysis.slice(0, 600)}` : "";
   const performance = input.performanceHint ? `\n${input.performanceHint}` : "";
@@ -166,19 +191,28 @@ function quickProductPrompt(input: ScriptInput): string {
   return `为商品生成 1 套短视频带货脚本，只输出合法 JSON，不要 markdown。
 
 商品名称：${input.productName}
-商品品类：${input.category}
+商品品类：${input.category}（仅供参考，若与商品图/名称不符，以你判断的真实品类为准）
 核心卖点：${input.productDescription || "根据商品名称自行提炼"}
 目标时长：${duration} 秒，分镜数量：${shotCount} 个
 视频模式：${input.videoMode || "product_closeup"}
 ${analysis}
 ${performance}
 
+${input.styleType === "mood" ? MOOD_FILM_GUIDE : CONTENT_STRATEGY_GUIDE}
+
+${input.localStore ? buildLocalStoreGuide(input.localStore, input.category) : buildTrendGuide(input.category)}
+
+${CATEGORY_VISUAL_GUIDE}
+
+${PACING_GUIDE}
+
 要求：
 - 第 1 镜必须 hook，最后 1 镜必须 cta
-- 旁白口语化、短句，适合短视频
+- 单镜 duration 只能是 1、2 或 3 秒：以 2 秒为主，高冲击碎镜可用 1 秒，重点镜最多 3 秒；所有分镜之和 = ${duration}
+- ${input.styleType === "mood" ? "文字极简：最多 2 镜有 voiceover（情绪短句），其余留空" : "旁白口语化、短句，适合短视频"}
 - 商品展示镜头 visualSource 用 "${visualSource}"；需要场景补充时才用 "ai_generate"
 - prompt/searchTerms 用英文，prompt 简短具体
-- ${sameLanguageHint(productText)}
+- ${localeHint(input.locale)}
 
 输出 JSON 格式：
 {
@@ -193,7 +227,7 @@ ${performance}
           "type": "hook",
           "duration": 3,
           "description": "具体画面",
-          "camera": "特写/推近等",
+          "camera": "运镜（纯静物镜别写推近/放大，写光影流动或平移；有人镜可写跟拍/环绕）",
           "visualSource": "${visualSource}",
           "transition": "direct_concat",
           "voiceover": "短旁白",
@@ -210,7 +244,7 @@ ${performance}
 
 function quickTopicPrompt(input: TopicScriptGenInput): string {
   const duration = clampInt(input.targetDuration, 12, 40, 20);
-  const shotCount = duration <= 18 ? 4 : 5;
+  const shotCount = shotCountFor(duration);
 
   return `围绕主题生成 1 套竖屏短视频脚本，只输出合法 JSON，不要 markdown。
 
@@ -221,8 +255,9 @@ function quickTopicPrompt(input: TopicScriptGenInput): string {
 要求：
 - 没有商品，不要出现购买、价格、下单
 - 第 1 镜必须 hook，最后 1 镜用 cta 表示收尾升华
+- 单镜 duration 只能是 1、2 或 3 秒且以 2 秒为主；description 写进行中的动作，camera 写明显的镜头运动，不要静态画面
 - 每镜必须有 searchTerms，且为英文
-- ${sameLanguageHint(input.topic)}
+- ${localeHint((input as { locale?: "zh" | "en" }).locale)}
 
 输出 JSON 格式：
 {
@@ -252,8 +287,7 @@ function quickTopicPrompt(input: TopicScriptGenInput): string {
 }
 
 function productScriptLanguage(input: ScriptInput) {
-  const text = `${input.productName || ""} ${input.productDescription || ""} ${input.usageAdvantage || ""}`;
-  return text.trim() && !/[一-鿿]/.test(text) ? "en" : "zh";
+  return input.locale === "en" ? "en" : "zh";
 }
 
 function splitDurations(total: number, count: number) {
@@ -271,78 +305,94 @@ export function buildTemplateProductScript(input: ScriptInput): GeneratedScript[
   const durations = splitDurations(duration, shotCount);
   const lang = productScriptLanguage(input);
   const name = input.productName || (lang === "zh" ? "这款商品" : "this product");
-  const sellingPoint = input.productDescription || input.usageAdvantage || (lang === "zh" ? "实用、好上手，适合日常场景" : "practical, easy to use, and made for everyday routines");
   const source = input.videoMode === "scene_demo" ? "ai_generate" : "product_image";
+  const category = input.category || "beauty";
 
-  const zh = [
+  // 这里是模型发生“允许降级”的异常时才会使用的结构骨架，不是事实生成器。
+  // 禁止根据商品名/品类臆造功效、性能、价格、材质、使用体验或优惠；每句都故意保留
+  // 明显的人工补充标记，避免模板草稿被误当成可直接投放的成稿。
+  type ShotType = "hook" | "pain_point" | "product_reveal" | "demo" | "cta" | "social_proof";
+  type DraftShot = { type: ShotType; description: string; camera: string; voiceover: string };
+  const zhMarker = "【待人工补充｜不可直接发布】";
+  const enMarker = "[REVIEW REQUIRED — DO NOT PUBLISH]";
+  const zh: DraftShot[] = [
     {
-      type: "hook" as const,
-      description: `${name} 的核心细节快速特写，画面干净、有冲击力`,
-      camera: "微距特写，缓慢推进",
-      voiceover: `别划走，${name}这个细节真的很实用。`,
+      type: "hook",
+      description: `${zhMarker} 用真实素材展示${name}外观；只写能够从素材确认的内容。`,
+      camera: "商品特写，缓慢推进",
+      voiceover: `${zhMarker} 请根据已核实的商品资料填写开场，不得臆造功效或体验。`,
     },
     {
-      type: "pain_point" as const,
-      description: "日常使用痛点场景，画面突出麻烦和对比",
-      camera: "中近景切换，节奏稍快",
-      voiceover: `很多人买同类产品，最怕的就是不好用、不耐用。`,
+      type: "pain_point",
+      description: `${zhMarker} 仅在有用户调研或商品资料支持时补充真实使用场景。`,
+      camera: "场景中景，保持主体清晰",
+      voiceover: `${zhMarker} 请填写有依据的用户需求；没有依据时删除本镜。`,
     },
     {
-      type: "product_reveal" as const,
-      description: `${name} 正面展示，突出外观和卖点`,
-      camera: "产品全貌展示，轻微横移",
-      voiceover: `${name}主打${sellingPoint}。`,
+      type: "product_reveal",
+      description: `${zhMarker} 展示${name}真实包装、规格或细节，不添加素材中不存在的特征。`,
+      camera: "商品全貌展示，轻微横移",
+      voiceover: `${zhMarker} 请从商品详情或检测资料中选择一条可核验信息。`,
     },
     {
-      type: "demo" as const,
-      description: "模拟真实使用过程，展示上手效果",
-      camera: "细节特写，跟随动作",
-      voiceover: "实际用起来步骤简单，新手也能很快上手。",
+      type: "demo",
+      description: `${zhMarker} 按真实说明演示${name}，避免未经验证的前后对比。`,
+      camera: "手部操作特写，跟随真实动作",
+      voiceover: `${zhMarker} 请填写真实操作步骤和限制条件，不得承诺效果。`,
     },
     {
-      type: "cta" as const,
-      description: "商品定格展示，叠加核心卖点文字",
-      camera: "静止定格，突出购买引导",
-      voiceover: "想省心选一款日常好物，可以先收藏再对比。",
+      type: "cta",
+      description: `${zhMarker} 用真实商品画面收尾；价格、优惠和库存必须发布前复核。`,
+      camera: "商品定格，保留字幕空间",
+      voiceover: `${zhMarker} 请填写合规行动引导，并核对价格、活动和适用条件。`,
     },
   ];
-  const en = [
+  const en: DraftShot[] = [
     {
-      type: "hook" as const,
-      description: `Fast close-up of ${name}, clean background and strong visual focus`,
-      camera: "macro close-up, slow push in",
-      voiceover: `Wait, this detail on ${name} is actually useful.`,
+      type: "hook",
+      description: `${enMarker} Show the real appearance of ${name}; include only details visible in verified source material.`,
+      camera: "product close-up, slow push in",
+      voiceover: `${enMarker} Add an opening based on verified product information; do not invent benefits or experiences.`,
     },
     {
-      type: "pain_point" as const,
-      description: "Everyday pain point scene with clear before-and-after contrast",
-      camera: "medium close-up cuts, quick rhythm",
-      voiceover: "Most products like this look fine, but the real question is whether they work every day.",
+      type: "pain_point",
+      description: `${enMarker} Add a real use case only when supported by product material or user research.`,
+      camera: "medium contextual shot, subject clearly visible",
+      voiceover: `${enMarker} Add a supported customer need, or remove this shot when no evidence exists.`,
     },
     {
-      type: "product_reveal" as const,
-      description: `Front product reveal of ${name}, highlighting the main selling point`,
-      camera: "full product reveal with gentle pan",
-      voiceover: `${name} is made for ${sellingPoint}.`,
+      type: "product_reveal",
+      description: `${enMarker} Show the real packaging, specifications, or details of ${name}; add no unseen features.`,
+      camera: "full product reveal, gentle pan",
+      voiceover: `${enMarker} Add one verifiable fact from the product listing or supporting documentation.`,
     },
     {
-      type: "demo" as const,
-      description: "Realistic usage demo showing the product in action",
-      camera: "detail close-up following the action",
-      voiceover: "It is simple to use, easy to understand, and fits into a normal routine.",
+      type: "demo",
+      description: `${enMarker} Demonstrate ${name} according to verified instructions; avoid unsupported before-and-after claims.`,
+      camera: "hand close-up following the real action",
+      voiceover: `${enMarker} Add the real steps and limitations; do not promise an outcome.`,
     },
     {
-      type: "cta" as const,
-      description: "Final product still with key benefit text overlay",
-      camera: "static hero shot",
-      voiceover: "Save this first if you want an easier pick for daily use.",
+      type: "cta",
+      description: `${enMarker} Close on the real product; recheck price, promotion, and availability before publishing.`,
+      camera: "static product shot with caption space",
+      voiceover: `${enMarker} Add a compliant call to action and verify every offer condition.`,
     },
   ];
   const copy = lang === "zh" ? zh : en;
-  const selected = copy.slice(0, shotCount);
+  const selected = shotCount === 4 ? [copy[0], copy[1], copy[2], copy[4]] : copy;
+
+  // 按品类定制的英文 prompt 风格
+  const promptStyleByCategory: Record<string, string> = {
+    beauty: "clean beauty product photography, soft natural light, premium skincare aesthetic, shallow depth of field",
+    food: "appetizing food photography, warm lighting, steam and texture visible, overhead and macro composition",
+    home: "cozy home interior, natural window light, tidy and minimal styling, lifestyle product photography",
+    fashion: "fashion product detail shot, natural texture visible, soft directional light, editorial style",
+    tech: "tech product photography, clean studio lighting, sleek and modern, sharp focus on design details",
+  };
 
   return [{
-    title: lang === "zh" ? `${name}种草` : `${name} pick`,
+    title: lang === "zh" ? `【占位草稿】${name}` : `[DRAFT] ${name}`,
     styleType: input.styleType || "pain_point",
     totalDuration: durations.reduce((sum, n) => sum + n, 0),
     shots: selected.map((shot, index) => ({
@@ -354,7 +404,7 @@ export function buildTemplateProductScript(input: ScriptInput): GeneratedScript[
       visualSource: shot.type === "pain_point" && input.videoMode === "scene_demo" ? "ai_generate" : source,
       transition: "direct_concat",
       voiceover: shot.voiceover,
-      prompt: `vertical product video shot, ${name}, clean commercial lighting, premium composition`,
+      prompt: `vertical product video shot, ${name}, ${promptStyleByCategory[category] || promptStyleByCategory.beauty}`,
       stockKeywords: [`${name} product`, "product closeup"],
       ...(shot.type === "product_reveal" || shot.type === "cta" ? { motion: "ken_burns" as const } : {}),
     })),
@@ -367,25 +417,31 @@ export function buildTemplateTopicScript(input: TopicScriptGenInput): GeneratedS
   const durations = splitDurations(duration, shotCount);
   const zh = /[一-鿿]/.test(input.topic);
   const topic = input.topic || (zh ? "这个主题" : "this topic");
-  const shots = zh
+  const marker = zh ? "【待人工补充｜不可直接发布】" : "[REVIEW REQUIRED — DO NOT PUBLISH]";
+  const allShots = zh
     ? [
-        ["hook", `用一个反差画面引出「${topic}」`, "特写快速推进", `你有没有发现，${topic}其实比想象中更简单？`],
-        ["demo", "展示第一个关键场景或动作", "中景跟拍", "先抓住最关键的一步，画面马上就顺了。"],
-        ["demo", "展示第二个细节，形成节奏变化", "细节特写", "再补上这个细节，整个感觉会更完整。"],
-        ["cta", "用干净画面收尾，留出字幕空间", "缓慢拉远", "收藏起来，下次照着做就行。"],
+        ["hook", `${marker} 用已核实素材引出「${topic}」。`, "特写快速推进", `${marker} 请依据可靠资料填写开场，不要把主题表述直接当成事实。`],
+        ["demo", `${marker} 展示第一条有来源支持的信息或场景。`, "中景跟拍", `${marker} 请补充第一条可核验内容并保留来源。`],
+        ["demo", `${marker} 展示第二条有来源支持的信息或场景。`, "细节特写", `${marker} 请补充第二条可核验内容；没有依据时删除本镜。`],
+        ["demo", `${marker} 补充必要的限制条件、反例或上下文。`, "稳定横移", `${marker} 请补充适用边界，避免绝对化结论。`],
+        ["cta", `${marker} 用中性画面收尾，留出字幕空间。`, "缓慢拉远", `${marker} 请填写不含未经核实承诺的收尾。`],
       ]
     : [
-        ["hook", `A contrast shot introducing ${topic}`, "quick close-up push in", `${topic} is simpler than it looks.`],
-        ["demo", "Show the first key scene or action", "medium tracking shot", "Start with the one step that makes the whole idea click."],
-        ["demo", "Show a second detail with a different rhythm", "detail close-up", "Add this small detail and the story feels complete."],
-        ["cta", "Clean closing shot with space for captions", "slow pull back", "Save this and come back to it when you need it."],
+        ["hook", `${marker} Introduce ${topic} using verified source material.`, "quick close-up push in", `${marker} Add an opening grounded in reliable sources; do not present the topic wording itself as fact.`],
+        ["demo", `${marker} Show the first sourced point or scene.`, "medium tracking shot", `${marker} Add the first verifiable point and retain its source.`],
+        ["demo", `${marker} Show the second sourced point or scene.`, "detail close-up", `${marker} Add a second verifiable point, or remove this shot when no evidence exists.`],
+        ["demo", `${marker} Add necessary limitations, counterexamples, or context.`, "steady lateral move", `${marker} Add the scope and avoid absolute conclusions.`],
+        ["cta", `${marker} Close on a neutral scene with caption space.`, "slow pull back", `${marker} Add a closing line without unsupported promises.`],
       ];
+  const shots = shotCount === 4
+    ? [allShots[0], allShots[1], allShots[2], allShots[4]]
+    : allShots;
 
   return [{
-    title: zh ? topic.slice(0, 10) : topic.slice(0, 24),
+    title: zh ? `【占位草稿】${topic.slice(0, 10)}` : `[DRAFT] ${topic.slice(0, 24)}`,
     styleType: "custom",
     totalDuration: durations.reduce((sum, n) => sum + n, 0),
-    shots: shots.slice(0, shotCount).map(([type, description, camera, voiceover], index) => ({
+    shots: shots.map(([type, description, camera, voiceover], index) => ({
       shotId: index + 1,
       type: type as Shot["type"],
       duration: durations[index],
@@ -420,6 +476,42 @@ export function extractJSON(text: string): string {
 }
 
 /**
+ * 转义 JSON 字符串值内部的裸控制字符（换行/制表符等）。
+ * LLM（尤其火山关闭思考后直出 JSON）常在 voiceover/description 里塞裸换行，标准 JSON 不允许 → JSON.parse 抛
+ * "Invalid control character"。用状态机只处理「字符串内」的控制字符，不动结构性空白，避免误伤合法 JSON。
+ */
+function sanitizeJsonControlChars(raw: string): string {
+  let out = "";
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i];
+    if (escaped) { out += ch; escaped = false; continue; }
+    if (ch === "\\") { out += ch; escaped = true; continue; }
+    if (ch === '"') { inString = !inString; out += ch; continue; }
+    if (inString && ch.charCodeAt(0) <= 0x1f) {
+      out += ch === "\n" ? "\\n" : ch === "\r" ? "\\r" : ch === "\t" ? "\\t"
+        : "\\u" + ch.charCodeAt(0).toString(16).padStart(4, "0");
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+/**
+ * 容错 JSON 解析：正常 JSON 直接 parse；失败则先清洗字符串内裸控制字符再重试一次。
+ * 让"AI 内容其实生成对了、只是格式有裸换行"的情况不再白白降级到兜底模板。
+ */
+export function parseJsonLoose(jsonStr: string): unknown {
+  try {
+    return JSON.parse(jsonStr);
+  } catch {
+    return JSON.parse(sanitizeJsonControlChars(jsonStr));
+  }
+}
+
+/**
  * 给「JSON 解析失败」的错误补一句可操作提示：以 {/[ 开头却未以 }/] 收尾，
  * 多半是 max_tokens 截断了输出——提示增大 token 上限，而非干巴巴的「非法 JSON」。
  */
@@ -449,7 +541,7 @@ function validateShot(shot: Partial<Shot>, index: number): Shot {
     type: validTypes.includes(shot.type as Shot["type"]) ? (shot.type as Shot["type"]) : "demo",
     duration: typeof shot.duration === "number" && shot.duration > 0 ? shot.duration : 3,
     description: shot.description || "",
-    camera: shot.camera || "固定镜头",
+    camera: shot.camera || "镜头缓慢推近",
     visualSource: validSources.includes(shot.visualSource as Shot["visualSource"]) ? (shot.visualSource as Shot["visualSource"]) : "ai_generate",
     // 默认转场与 schema(videoClips.transitionType) 及 UI 默认保持一致（ai_start_end）
     transition: validTransitions.includes(shot.transition as Shot["transition"]) ? (shot.transition as Shot["transition"]) : "ai_start_end",
@@ -472,8 +564,12 @@ function validateShot(shot: Partial<Shot>, index: number): Shot {
  * 验证并修正完整的脚本数据
  */
 function validateScript(raw: Record<string, unknown>, fallbackStyleType: string): GeneratedScript {
+  // 先滤掉 null/非对象元素：LLM 偶尔产出 shots:[{...}, null]，validateShot 首行就访问 shot.xxx 会抛 TypeError
+  // → 整次（可能含多套有效脚本的）付费生成 500 作废。与 parseScriptResponse 的脚本级过滤同口径。
   const shots = Array.isArray(raw.shots)
-    ? (raw.shots as Partial<Shot>[]).map((s, i) => validateShot(s, i))
+    ? (raw.shots as Partial<Shot>[])
+        .filter((s): s is Partial<Shot> => typeof s === "object" && s !== null)
+        .map((s, i) => validateShot(s, i))
     : [];
 
   const totalDuration = typeof raw.totalDuration === "number"
@@ -496,29 +592,29 @@ function validateScript(raw: Record<string, unknown>, fallbackStyleType: string)
  * @returns 生成的脚本数组
  */
 export async function generateScript(input: ScriptInput): Promise<GeneratedScript[]> {
-  const client = createClient(input.llmConfig);
   const count = clampInt(input.count, 1, 5, 3);
   const quick = input.quick || count === 1;
   const userPrompt = quick ? quickProductPrompt(input) : buildBatchPrompt(input, count);
   const systemPrompt = quick
-    ? "你是短视频编导。严格只输出可解析 JSON，不要解释，不要 markdown。"
+    ? "你是短视频编导。创作原则：①前3秒必须有强钩子（画面/声音/文字任一）②旁白说人话不播音腔 ③每镜只讲一件事 ④prompt/searchTerms用英文且具体 ⑤禁止使用\"家人们\"/\"绝绝子\"/\"yyds\"等过时表达。只输出可解析JSON。"
     : input.systemPrompt || SYSTEM_PROMPT;
-  const maxTokens = input.maxTokens ?? input.llmConfig.maxTokens ?? (quick ? 2500 : 10000);
+  const maxTokens = input.maxTokens ?? input.llmConfig.maxTokens ?? (quick ? 5000 : 10000);
   const timeoutMs = input.timeoutMs ?? input.llmConfig.timeoutMs ?? (count === 1 ? 30000 : 60000);
+  const client = createClient(input.llmConfig, timeoutMs);
 
   // 调用 LLM 生成脚本
   let response;
   const req = requestSignal(timeoutMs);
   try {
-    response = await client.chat.completions.create({
+    response = await client.chat.completions.create(arkThinkingOff({
       model: input.llmConfig.model,
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
       ],
-      temperature: 0.8,
+      temperature: 0.85,
       max_tokens: maxTokens,
-    }, {
+    }, input.llmConfig.baseUrl), {
       signal: req.signal,
     });
   } catch (e: unknown) {
@@ -533,6 +629,7 @@ export async function generateScript(input: ScriptInput): Promise<GeneratedScrip
     throw new Error("LLM 未返回有效内容");
   }
 
+  // 主题成片没有带货风格概念，统一回退为 "custom"
   return parseScriptResponse(content, input.styleType);
 }
 
@@ -557,28 +654,28 @@ export interface TopicScriptGenInput extends TopicScriptInput {
  * @returns 生成的脚本数组（含 stockKeywords，可直接喂给 stock-fill 配齐画面）
  */
 export async function generateTopicScript(input: TopicScriptGenInput): Promise<GeneratedScript[]> {
-  const client = createClient(input.llmConfig);
   const count = clampInt(input.count, 1, 5, 3);
   const quick = input.quick || count === 1;
   const userPrompt = quick ? quickTopicPrompt(input) : buildTopicBatchPrompt(input, count);
   const systemPrompt = quick
-    ? "你是短视频内容编导。严格只输出可解析 JSON，不要解释，不要 markdown。"
+    ? "你是短视频内容编导。原则：①前3秒留人 ②旁白说人话 ③每镜只讲一件事 ④searchTerms用英文且具象 ⑤禁止空洞形容词和播音腔。只输出可解析JSON。"
     : input.systemPrompt || TOPIC_SYSTEM_PROMPT;
-  const maxTokens = input.maxTokens ?? input.llmConfig.maxTokens ?? (quick ? 2500 : 10000);
+  const maxTokens = input.maxTokens ?? input.llmConfig.maxTokens ?? (quick ? 5000 : 10000);
   const timeoutMs = input.timeoutMs ?? input.llmConfig.timeoutMs ?? (count === 1 ? 30000 : 60000);
+  const client = createClient(input.llmConfig, timeoutMs);
 
   let response;
   const req = requestSignal(timeoutMs);
   try {
-    response = await client.chat.completions.create({
+    response = await client.chat.completions.create(arkThinkingOff({
       model: input.llmConfig.model,
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
       ],
-      temperature: 0.85,
+      temperature: 0.9,
       max_tokens: maxTokens,
-    }, {
+    }, input.llmConfig.baseUrl), {
       signal: req.signal,
     });
   } catch (e: unknown) {
@@ -603,18 +700,18 @@ export async function generateTopicScript(input: TopicScriptGenInput): Promise<G
  * @returns 单个生成的脚本
  */
 export async function generateSingleScript(input: ScriptInput): Promise<GeneratedScript> {
-  const client = createClient(input.llmConfig);
+  const client = createClient(input.llmConfig, input.timeoutMs);
   const userPrompt = buildUserPrompt(input);
   const systemPrompt = input.systemPrompt || SYSTEM_PROMPT;
 
-  const response = await client.chat.completions.create({
+  const response = await client.chat.completions.create(arkThinkingOff({
     model: input.llmConfig.model,
     messages: [
       { role: "system", content: systemPrompt },
       { role: "user", content: userPrompt },
     ],
-    temperature: 0.8,
-  });
+    temperature: 0.85,
+  }, input.llmConfig.baseUrl));
 
   const content = response.choices[0]?.message?.content;
   if (!content) {
@@ -624,7 +721,7 @@ export async function generateSingleScript(input: ScriptInput): Promise<Generate
   const jsonStr = extractJSON(content);
   let parsed: Record<string, unknown>;
   try {
-    parsed = JSON.parse(jsonStr);
+    parsed = parseJsonLoose(jsonStr) as Record<string, unknown>;
   } catch {
     throw new Error(`LLM 返回的内容不是合法 JSON${truncationHint(jsonStr)}: ${jsonStr.substring(0, 200)}`);
   }
@@ -645,22 +742,22 @@ export function generateScriptStream(
   const abortController = new AbortController();
 
   const run = async () => {
-    const client = createClient(input.llmConfig);
+    const client = createClient(input.llmConfig, input.timeoutMs);
     const userPrompt = buildUserPrompt(input);
     const systemPrompt = input.systemPrompt || SYSTEM_PROMPT;
 
     let fullContent = "";
 
     try {
-      const stream = await client.chat.completions.create({
+      const stream = await client.chat.completions.create(arkThinkingOff({
           model: input.llmConfig.model,
           messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt },
         ],
-        temperature: 0.8,
+        temperature: 0.85,
         stream: true,
-      }, {
+      }, input.llmConfig.baseUrl), {
         signal: abortController.signal,
       });
 
@@ -697,12 +794,12 @@ export function createScriptStream(input: ScriptInput): ReadableStream<Uint8Arra
 
   return new ReadableStream({
     async start(controller) {
-      const client = createClient(input.llmConfig);
+      const client = createClient(input.llmConfig, input.timeoutMs);
       const userPrompt = buildUserPrompt(input);
       const systemPrompt = input.systemPrompt || SYSTEM_PROMPT;
 
       try {
-        const stream = await client.chat.completions.create({
+        const stream = await client.chat.completions.create(arkThinkingOff({
           model: input.llmConfig.model,
           messages: [
             { role: "system", content: systemPrompt },
@@ -710,7 +807,7 @@ export function createScriptStream(input: ScriptInput): ReadableStream<Uint8Arra
           ],
           temperature: 0.8,
           stream: true,
-        });
+        }, input.llmConfig.baseUrl));
 
         for await (const chunk of stream) {
           const delta = chunk.choices[0]?.delta?.content;
@@ -741,10 +838,10 @@ export async function analyzeProduct(
   config: LLMConfig,
   systemPrompt = PRODUCT_ANALYSIS_PROMPT,
 ): Promise<string> {
-  const client = createClient(config);
   const model = config.visionModel || config.model;
   const timeoutMs = config.timeoutMs ?? 12000;
   const maxTokens = config.maxTokens ?? 1200;
+  const client = createClient(config, timeoutMs);
 
   // 构建带图片的消息内容
   const imageContent: OpenAI.Chat.Completions.ChatCompletionContentPart[] = imageUrls.map(
@@ -757,7 +854,7 @@ export async function analyzeProduct(
   const req = requestSignal(timeoutMs);
   let response;
   try {
-    response = await client.chat.completions.create({
+    response = await client.chat.completions.create(arkThinkingOff({
       model,
       messages: [
         {
@@ -770,7 +867,7 @@ export async function analyzeProduct(
       ],
       temperature: 0.3,
       max_tokens: maxTokens,
-    }, {
+    }, config.baseUrl), {
       signal: req.signal,
     });
   } catch (e: unknown) {
@@ -796,7 +893,7 @@ export async function analyzeProductStructured(
   const rawResult = await analyzeProduct(imageUrls, config, systemPrompt);
   const jsonStr = extractJSON(rawResult);
   try {
-    return JSON.parse(jsonStr) as ProductAnalysisResult;
+    return parseJsonLoose(jsonStr) as ProductAnalysisResult;
   } catch {
     throw new Error(`商品分析结果不是合法 JSON${truncationHint(jsonStr)}: ${jsonStr.substring(0, 200)}`);
   }
@@ -813,7 +910,7 @@ export function parseScriptResponse(content: string, fallbackStyleType: string):
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let parsed: any;
   try {
-    parsed = JSON.parse(jsonStr);
+    parsed = parseJsonLoose(jsonStr);
   } catch {
     throw new Error(`LLM 返回的内容不是合法 JSON${truncationHint(jsonStr)}: ${jsonStr.substring(0, 200)}`);
   }

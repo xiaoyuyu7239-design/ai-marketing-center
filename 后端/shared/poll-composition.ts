@@ -1,14 +1,4 @@
-/**
- * 共享合成轮询工具 — video / export / batch 三页去重。
- *
- * 向 /api/project/:id/compose 轮询直到 done/failed/timeout，
- * 返回合成结果 URL。
- *
- * @example
- * const url = await pollComposition("proj_123", "comp_456");
- * // 或传入自定义超时和回调
- * const url = await pollComposition("proj_123", "comp_456", { onStatus: (c) => console.log(c.status) });
- */
+/** 共享 composition 精确轮询；服务端任务超时不等于失败，超时后仍可凭 compositionId 稍后查看。 */
 
 interface ComposeStatus {
   status: string;
@@ -16,58 +6,87 @@ interface ComposeStatus {
   errorMessage?: string | null;
 }
 
+class TerminalPollError extends Error {}
+
 export interface PollCompositionOpts {
-  /** 轮询间隔 ms（默认 3000） */
   intervalMs?: number;
-  /** 超时 ms（默认 300000 = 5分钟） */
   timeoutMs?: number;
-  /** 每次状态更新回调（可用于 UI 进度展示） */
   onStatus?: (status: string) => void;
-  /** 失败时的错误信息 */
   failMessage?: string;
-  /** 超时时的错误信息 */
   timeoutMessage?: string;
+  signal?: AbortSignal;
+  /** 连续网络/5xx 错误上限；成功一次后清零。 */
+  maxConsecutiveErrors?: number;
+  /** 单次状态请求超时；防止一个挂起 fetch 绕过整个轮询 deadline。 */
+  requestTimeoutMs?: number;
+}
+
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(new DOMException("操作已取消", "AbortError"));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", abort);
+      resolve();
+    }, ms);
+    const abort = () => {
+      clearTimeout(timer);
+      reject(new DOMException("操作已取消", "AbortError"));
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+  });
 }
 
 export async function pollComposition(
   projectId: string,
-  compositionId?: string,
-  opts: PollCompositionOpts = {}
+  compositionId: string,
+  opts: PollCompositionOpts = {},
 ): Promise<string> {
+  if (!compositionId?.trim()) throw new Error("合成任务未返回 compositionId，无法安全轮询");
   const {
-    intervalMs = 3000,
-    timeoutMs = 300_000,
+    intervalMs = 3_000,
+    timeoutMs = 15 * 60 * 1_000,
     failMessage = "合成失败",
-    timeoutMessage = "合成超时",
+    timeoutMessage = "等待已超时，但任务可能仍在后台执行；请稍后回到项目查看",
+    maxConsecutiveErrors = 5,
+    requestTimeoutMs = 10_000,
   } = opts;
+  const deadline = Date.now() + timeoutMs;
+  const url = `/api/project/${encodeURIComponent(projectId)}/compose?compositionId=${encodeURIComponent(compositionId)}`;
+  let consecutiveErrors = 0;
 
-  const qs = compositionId
-    ? `?compositionId=${encodeURIComponent(compositionId)}`
-    : "";
-
-  return new Promise<string>((resolve, reject) => {
-    const poll = setInterval(async () => {
-      try {
-        const r = await fetch(`/api/project/${projectId}/compose${qs}`);
-        const d = await r.json();
-        const c: ComposeStatus | undefined = d.composition;
-        if (!c) return;
-        opts.onStatus?.(c.status);
-        if (c.status === "done" && c.url) {
-          clearInterval(poll);
-          resolve(c.url);
-        } else if (c.status === "failed") {
-          clearInterval(poll);
-          reject(new Error(c.errorMessage || failMessage));
-        }
-      } catch {
-        // 单次轮询失败忽略，继续重试
+  while (Date.now() < deadline) {
+    if (opts.signal?.aborted) throw new DOMException("操作已取消", "AbortError");
+    try {
+      const remainingMs = Math.max(1, deadline - Date.now());
+      const requestSignal = AbortSignal.timeout(Math.min(Math.max(250, requestTimeoutMs), remainingMs));
+      const signal = opts.signal ? AbortSignal.any([opts.signal, requestSignal]) : requestSignal;
+      const response = await fetch(url, { cache: "no-store", signal });
+      if (response.status === 401 || response.status === 403 || response.status === 404) {
+        const data = await response.json().catch(() => ({}));
+        throw new TerminalPollError(
+          typeof data.error === "string" ? data.error : "合成任务不存在或无权查看",
+        );
       }
-    }, intervalMs);
-
-    setTimeout(() => {
-      clearInterval(poll);
-      reject(new Error(timeoutMessage));
-    }, timeoutMs);
-  });
+      if (!response.ok) throw new Error(`查询任务状态失败（HTTP ${response.status}）`);
+      const data = await response.json();
+      const composition: ComposeStatus | undefined = data.composition;
+      if (!composition) throw new Error("合成任务状态不存在");
+      consecutiveErrors = 0;
+      opts.onStatus?.(composition.status);
+      if (composition.status === "done" && composition.url) return composition.url;
+      if (composition.status === "failed") {
+        throw new TerminalPollError(composition.errorMessage || failMessage);
+      }
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") throw error;
+      if (error instanceof TerminalPollError) throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      consecutiveErrors += 1;
+      if (consecutiveErrors >= maxConsecutiveErrors) {
+        throw new Error(`暂时无法查询合成任务状态：${message}。任务仍可能在后台执行，请稍后回来查看`);
+      }
+    }
+    await delay(Math.max(250, intervalMs), opts.signal);
+  }
+  throw new Error(timeoutMessage);
 }

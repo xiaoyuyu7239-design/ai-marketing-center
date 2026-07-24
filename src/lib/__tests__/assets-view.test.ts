@@ -29,12 +29,26 @@ describe("buildAssetRows", () => {
   it("已落库且就绪的素材 → 就绪并带缩略图，透传 assetType", () => {
     const shots = [shot({ shotId: 1, visualSource: "ai_generate" })];
     const saved: SavedAssetRow[] = [
-      { shotId: 1, filePath: "/api/files/p1/stock/a.jpg", status: "done", type: "stock_footage" },
+      {
+        id: "asset-1",
+        shotId: 1,
+        filePath: "/api/files/p1/stock/a.jpg",
+        status: "done",
+        type: "stock_footage",
+        provider: "openverse",
+        model: "stock-search-v1",
+        prompt: "[motion-faceless-retry:v1] 仅展示商品局部",
+      },
     ];
     const rows = buildAssetRows(shots, saved, []);
     expect(rows[0].status).toBe("done");
     expect(rows[0].thumbnailUrl).toBe("/api/files/p1/stock/a.jpg");
     expect(rows[0].assetType).toBe("stock_footage");
+    expect(rows[0].assetId).toBe("asset-1");
+    expect(rows[0].assetFileUrl).toBe("/api/files/p1/stock/a.jpg");
+    expect(rows[0].assetProvider).toBe("openverse");
+    expect(rows[0].assetModel).toBe("stock-search-v1");
+    expect(rows[0].assetPrompt).toBe("[motion-faceless-retry:v1] 仅展示商品局部");
     expect(rows[0].isVideo).toBeUndefined(); // 图片素材不是视频
   });
 
@@ -52,6 +66,7 @@ describe("buildAssetRows", () => {
     const rows = buildAssetRows(shots, saved, []);
     expect(rows[0].isVideo).toBe(true);
     expect(rows[0].thumbnailUrl).toBe("https://cdn/preview.jpg"); // 用预览图，不拿 mp4 当 <img>
+    expect(rows[0].assetFileUrl).toBe("/api/files/p1/stock/clip.mp4");
   });
 
   it("视频素材但无预览图 → isVideo 仍为 true，缩略图回退到文件本身", () => {
@@ -77,6 +92,7 @@ describe("buildAssetRows", () => {
     const rows = buildAssetRows(shots, [], ["/uploads/prod.jpg"]);
     expect(rows[0].status).toBe("done");
     expect(rows[0].thumbnailUrl).toBe("/uploads/prod.jpg");
+    expect(rows[0].assetFileUrl).toBe("/uploads/prod.jpg");
   });
 
   it("普通 AI 分镜无素材 → 待生成", () => {
@@ -94,6 +110,45 @@ describe("buildAssetRows", () => {
     const rows = buildAssetRows(shots, saved, ["/uploads/prod.jpg"]);
     expect(rows[0].thumbnailUrl).toBe("/api/files/p1/a.png");
     expect(rows[0].assetType).toBe("ai_generated");
+  });
+
+  it("保留历史版本后，始终选 createdAt 最新的已完成素材", () => {
+    const shots = [shot({ shotId: 1 })];
+    const saved: SavedAssetRow[] = [
+      {
+        id: "asset-new",
+        shotId: 1,
+        filePath: "/api/files/p1/new.png",
+        status: "done",
+        type: "ai_generated",
+        createdAt: "2026-07-17T08:00:10.000Z",
+      },
+      // 故意把旧行放在数组末尾，防止回归到“Map 后写覆盖”。
+      {
+        id: "asset-old",
+        shotId: 1,
+        filePath: "/api/files/p1/old.png",
+        status: "done",
+        type: "ai_generated",
+        createdAt: "2026-07-17T08:00:00.000Z",
+      },
+    ];
+    const rows = buildAssetRows(shots, saved, []);
+    expect(rows[0].assetId).toBe("asset-new");
+    expect(rows[0].assetFileUrl).toBe("/api/files/p1/new.png");
+  });
+
+  it("createdAt 相同时以服务端插入顺序选最新版，不用随机 UUID 猜新旧", () => {
+    const createdAt = "2026-07-17T08:00:00.000Z";
+    const rows = buildAssetRows(
+      [shot({ shotId: 1 })],
+      [
+        { id: "asset-z", shotId: 1, filePath: "/old.png", status: "done", createdAt, revisionOrder: 10 },
+        { id: "asset-a", shotId: 1, filePath: "/new.png", status: "done", createdAt, revisionOrder: 11 },
+      ],
+      [],
+    );
+    expect(rows[0].assetId).toBe("asset-a");
   });
 });
 

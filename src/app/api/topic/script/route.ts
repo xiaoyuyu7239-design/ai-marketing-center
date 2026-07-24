@@ -4,7 +4,19 @@ import type { TopicNarrationStyle } from "@backend/script-engine/prompts";
 import { getDb } from "@backend/db";
 import { scripts as scriptsTable, projects } from "@backend/db/schema";
 import { eq } from "drizzle-orm";
-import { runAgentOperation } from "@backend/core/agent/agent-strategy";
+import { requireMerchant } from "@backend/core/auth/require-merchant";
+import {
+  consumeExpensiveRouteRateLimit,
+  EXPENSIVE_RATE_LIMIT_PRESETS,
+  rateLimitResponse,
+} from "@backend/core/security/rate-limit";
+import {
+  runMeteredAgentOperation,
+  QuotaExceededError,
+  safeGenerationErrorMessage,
+} from "@backend/core/auth/usage";
+import { classifyAgentError } from "@server/admin/agents";
+import { singleUserModeEnabled } from "@backend/core/security/runtime-config";
 
 const VALID_NARRATION = new Set<TopicNarrationStyle>([
   "knowledge",
@@ -28,6 +40,10 @@ function topicToName(topic: string): string {
  * body: { topic, narrationStyle?, targetDuration?, count?, platforms?, projectId? }
  */
 export async function POST(req: NextRequest) {
+  const auth = await requireMerchant(req);
+  if ("error" in auth) return auth.error;
+  const limit = consumeExpensiveRouteRateLimit(req, auth.merchant.id, "topic:script", EXPENSIVE_RATE_LIMIT_PRESETS.llm);
+  if (!limit.allowed) return rateLimitResponse(limit, "主题脚本生成过于频繁，请稍后再试");
   let body: Record<string, unknown>;
   try {
     body = await req.json();
@@ -66,10 +82,10 @@ export async function POST(req: NextRequest) {
   let projectId = typeof body.projectId === "string" && body.projectId ? body.projectId : "";
   if (projectId) {
     const exists = await db
-      .select({ id: projects.id, contentType: projects.contentType })
+      .select({ id: projects.id, contentType: projects.contentType, merchantId: projects.merchantId })
       .from(projects)
       .where(eq(projects.id, projectId));
-    if (exists.length === 0) {
+    if (exists.length === 0 || exists[0].merchantId !== auth.merchant.id) {
       return NextResponse.json({ error: "项目不存在" }, { status: 404 });
     }
     // 不能用一句话主题脚本覆盖带货项目——否则会把它静默改成 topic 并删掉其已有脚本
@@ -82,7 +98,7 @@ export async function POST(req: NextRequest) {
   } else {
     const [created] = await db
       .insert(projects)
-      .values({ name: topicToName(topic), contentType: "topic", topic, status: "draft" })
+      .values({ merchantId: auth.merchant.id, name: topicToName(topic), contentType: "topic", topic, status: "draft" })
       .returning();
     projectId = created.id;
   }
@@ -91,7 +107,7 @@ export async function POST(req: NextRequest) {
   let generated;
   let usedTemplateFallback = false;
   try {
-    generated = await runAgentOperation("topic-script", projectId || topic, (config, prompt) =>
+    generated = await runMeteredAgentOperation(auth.merchant.id, "topic-script", projectId || topic, (config, prompt) =>
       generateTopicScript({
         topic,
         narrationStyle,
@@ -106,10 +122,17 @@ export async function POST(req: NextRequest) {
       })
     );
   } catch (error) {
-    if (count === 1) {
+    if (error instanceof QuotaExceededError) {
+      // 配额用尽要明确告知，不能悄悄回退成模板脚本
+      return NextResponse.json({ error: error.message, projectId }, { status: 402 });
+    }
+    const classified = classifyAgentError(error);
+    if (singleUserModeEnabled() && count === 1 && classified.fallbackAllowed) {
       usedTemplateFallback = true;
-      const reason = error instanceof Error ? error.message : String(error);
-      console.warn("主题脚本 AI 生成超时/失败，已使用本地模板兜底:", reason);
+      console.warn(
+        `主题脚本 AI 生成发生可降级错误（${classified.category}），已生成本地占位草稿:`,
+        classified.reason,
+      );
       generated = buildTemplateTopicScript({
         topic,
         narrationStyle,
@@ -122,9 +145,11 @@ export async function POST(req: NextRequest) {
         llmConfig: { baseUrl: "", apiKey: "", model: "template-fallback" },
       });
     } else {
-      const msg = error instanceof Error ? error.message : String(error);
       // 项目已建好，返回 projectId 便于前端跳转后重试
-      return NextResponse.json({ error: `脚本生成失败: ${msg}`, projectId }, { status: 500 });
+      return NextResponse.json({
+        error: safeGenerationErrorMessage(error, "主题脚本生成失败，请稍后重试"),
+        projectId,
+      }, { status: 500 });
     }
   }
 
@@ -164,5 +189,11 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "脚本落库失败，请重试", projectId }, { status: 500 });
   }
 
-  return NextResponse.json({ projectId, scripts: savedScripts, ...(usedTemplateFallback && { warning: "AI 生成响应较慢，已先生成一套可编辑模板脚本" }) });
+  return NextResponse.json({
+    projectId,
+    scripts: savedScripts,
+    ...(usedTemplateFallback && {
+      warning: "AI 生成暂不可用，已生成结构占位草稿；内容未经核实、不可直接发布，请逐镜补充并人工复核。",
+    }),
+  });
 }

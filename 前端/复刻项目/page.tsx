@@ -91,6 +91,7 @@ export default function ClonePage() {
           sourceVideoUrl: videoUrl,
         }),
       });
+      if (projRes.status === 401) throw new Error("请先到创作工作台登录商家账号，再回来复刻");
       if (!projRes.ok) throw new Error(t("errorProjectCreate"));
       const project = await projRes.json();
 
@@ -138,7 +139,7 @@ export default function ClonePage() {
       setGenError(err instanceof Error ? err.message : t("errorCloneFailed"));
       setIsGenerating(false);
     }
-  }, [isGenerating, productName, productFeatures, videoUrl, router, t]);
+  }, [isGenerating, productName, productFeatures, productImages, videoUrl, router, t]);
 
   /** 处理文件选择/上传 */
   const handleFiles = useCallback(

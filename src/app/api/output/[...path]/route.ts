@@ -5,8 +5,9 @@ import { stat } from "fs/promises";
 import { join, normalize, sep } from "path";
 import { createReadStream, existsSync } from "fs";
 import { Readable } from "stream";
+import { guardMediaAccess } from "@backend/core/auth/media-access";
 
-// 合成产物（视频）文件服务 - 提供 data/output 下的成片访问/下载
+// 合成产物（视频）文件服务 - 提供 data/output 下的成片访问/下载（商家私有内容，需会话且校验项目归属）
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ path: string[] }> }
@@ -16,6 +17,11 @@ export async function GET(
   const outputRoot = join(getDataDir(), "output");
   // 解码并归一化路径，防止 ..%2f 等编码绕过造成路径穿越
   const decodedSegments = path.map((seg) => decodeURIComponent(seg));
+
+  // 租户守卫：按归一化后的真实首段目录校验项目归属（未登录 401、越权 404、运营/单用户放行）
+  const denied = await guardMediaAccess(req, outputRoot, decodedSegments);
+  if (denied) return denied;
+
   const filePath = normalize(join(outputRoot, ...decodedSegments));
 
   if (filePath !== outputRoot && !filePath.startsWith(outputRoot + sep)) {
@@ -44,7 +50,9 @@ export async function GET(
 
   const baseHeaders: Record<string, string> = {
     "Content-Type": mimeTypes[ext || ""] || "application/octet-stream",
-    "Cache-Control": "public, max-age=3600",
+    "Cache-Control": "private, no-store",
+    "Vary": "Cookie",
+    "X-Content-Type-Options": "nosniff",
     "Accept-Ranges": "bytes",
     ...(download ? { "Content-Disposition": `attachment; filename="${fileName}"` } : {}),
   };
@@ -54,8 +62,8 @@ export async function GET(
     return new NextResponse(null, {
       status: 416,
       headers: {
+        ...baseHeaders,
         "Content-Range": `bytes */${size}`,
-        "Accept-Ranges": "bytes",
       },
     });
   }

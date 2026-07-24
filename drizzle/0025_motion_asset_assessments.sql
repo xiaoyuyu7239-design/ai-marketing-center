@@ -1,0 +1,35 @@
+CREATE TABLE `motion_asset_assessments` (
+	`id` text PRIMARY KEY NOT NULL,
+	`merchant_id` text NOT NULL,
+	`project_id` text NOT NULL,
+	`asset_id` text NOT NULL,
+	`shot_id` integer NOT NULL,
+	`image_ref` text NOT NULL,
+	`image_hash` text NOT NULL,
+	`media_kind` text NOT NULL,
+	`width` integer,
+	`height` integer,
+	`policy` text NOT NULL,
+	`eligibility_state` text NOT NULL,
+	`eligibility_reason` text NOT NULL,
+	`eligibility_revision` text NOT NULL,
+	`source_model_revision` text NOT NULL,
+	`face_status` text NOT NULL,
+	`face_checked_image_hash` text,
+	`face_detector_revision` text NOT NULL,
+	`face_source` text NOT NULL,
+	`face_confidence_permille` integer,
+	`face_count` integer,
+	`created_at` integer DEFAULT (unixepoch()) NOT NULL,
+	`updated_at` integer DEFAULT (unixepoch()) NOT NULL,
+	FOREIGN KEY (`merchant_id`) REFERENCES `merchants`(`id`) ON UPDATE no action ON DELETE cascade,
+	FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON UPDATE no action ON DELETE cascade,
+	FOREIGN KEY (`asset_id`) REFERENCES `assets`(`id`) ON UPDATE no action ON DELETE cascade,
+	CONSTRAINT "motion_asset_assessments_shot_id_check" CHECK("motion_asset_assessments"."shot_id" >= 0),
+	CONSTRAINT "motion_asset_assessments_hash_check" CHECK(length("motion_asset_assessments"."image_hash") = 64 AND "motion_asset_assessments"."image_hash" NOT GLOB '*[^0-9a-f]*'),
+	CONSTRAINT "motion_asset_assessments_face_confidence_check" CHECK("motion_asset_assessments"."face_confidence_permille" IS NULL OR ("motion_asset_assessments"."face_confidence_permille" >= 0 AND "motion_asset_assessments"."face_confidence_permille" <= 1000)),
+	CONSTRAINT "motion_asset_assessments_dimensions_check" CHECK(("motion_asset_assessments"."width" IS NULL OR "motion_asset_assessments"."width" > 0) AND ("motion_asset_assessments"."height" IS NULL OR "motion_asset_assessments"."height" > 0))
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `motion_asset_assessments_asset_unique` ON `motion_asset_assessments` (`asset_id`);--> statement-breakpoint
+CREATE INDEX `motion_asset_assessments_merchant_project_shot_idx` ON `motion_asset_assessments` (`merchant_id`,`project_id`,`shot_id`);

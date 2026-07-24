@@ -1,6 +1,6 @@
 # 复刻项目
 
-**路由**: `/project/clone`  
+**路由**: `/project/clone`
 **文件**: `src/app/project/clone/page.tsx` → `前端/复刻项目/page.tsx`
 
 ## 功能
@@ -14,4 +14,3 @@
 
 ## 添加新功能
 - 新分析维度：在 `mockShots` / `analyze` 逻辑中添加
-

@@ -1,0 +1,18 @@
+# 邀请内测 Web 发布源码白名单。目录必须以 / 结尾。
+# 修改后必须同步 Dockerfile 本地 COPY 与 .dockerignore，并运行 ops:verify-release-source。
+package.json
+pnpm-lock.yaml
+pnpm-workspace.yaml
+next.config.ts
+next-env.d.ts
+tsconfig.json
+postcss.config.mjs
+tailwind.config.js
+src/
+前端/
+后端/
+服务器/
+public/
+drizzle/
+scripts/
+tools/matting/

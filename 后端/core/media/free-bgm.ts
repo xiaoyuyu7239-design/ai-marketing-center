@@ -14,6 +14,10 @@ export interface FreeBgmResult {
   author: string;
   license: string;
   sourceUrl: string;
+  provider: string;
+  licenseUrl?: string;
+  attributionText?: string;
+  requiresAttribution?: boolean;
 }
 
 // 品类 → 配乐情绪检索词：让美妆/美食/数码等各取贴合的免费 CC 音乐，而非全都同一条 ambient。
@@ -70,7 +74,16 @@ export async function fetchFreeBgm(
     for (const pick of pool) {
       try {
         const { filePath } = await downloadStockFile(pick.downloadUrl, bgmDir, `bgm_${Date.now()}`, "audio");
-        return { localPath: filePath, author: pick.author, license: pick.license, sourceUrl: pick.pageUrl };
+        return {
+          localPath: filePath,
+          author: pick.author,
+          license: pick.license,
+          sourceUrl: pick.pageUrl,
+          provider: pick.source,
+          licenseUrl: pick.licenseUrl,
+          attributionText: pick.attributionText,
+          requiresAttribution: pick.requiresAttribution,
+        };
       } catch {
         // 该曲目下载失败（如需鉴权 401）→ 试下一条
       }

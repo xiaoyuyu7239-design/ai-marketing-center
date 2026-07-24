@@ -11,8 +11,10 @@ import { Label } from "@frontend/components/ui/label";
 import { Input } from "@frontend/components/ui/input";
 import { useT } from "@frontend/i18n";
 import { pollComposition } from "@backend/shared/poll-composition";
+import { acquireComposeOperation, clearComposeOperation } from "@frontend/lib/compose-operation";
 import { RENDER_PRESETS, DEFAULT_RENDER_PRESET, type RenderPreset } from "@backend/core/media/compose-presets";
 import {
+  AGENT_GENERATION_SETTINGS_LATEST_KEY,
   parseStoredAgentGenerationSettings,
   projectAgentGenerationSettingsKey,
 } from "@backend/core/agent/agent-generation-settings";
@@ -34,6 +36,8 @@ interface VideoClipItem {
   type: Shot["type"];
   duration: number;
   voiceover: string;
+  /** 画面描述：氛围大片模式多数分镜无文字，列表回退展示画面 */
+  description: string;
   transition: "ai_start_end" | "ai_reference" | "direct_concat" | "ffmpeg_fade";
 }
 
@@ -104,6 +108,7 @@ interface DbShot {
   type: VideoClipItem["type"];
   duration: number;
   voiceover: string;
+  description?: string;
   transition: VideoClipItem["transition"];
 }
 
@@ -123,7 +128,7 @@ export default function VideoPage() {
   const tRef = useRef(t);
   tRef.current = t;
   const { id } = useParams<{ id: string }>();
-  const workflowStepHrefs = [`/project/${id}/script`, `/project/${id}/assets`, `/project/${id}/video`, `/project/${id}/export`];
+  const workflowStepHrefs = [`/project/${id}/script`, `/project/${id}/assets`, `/project/${id}/motion`, `/project/${id}/video`, `/project/${id}/export`];
   const [clips, setClips] = useState<VideoClipItem[]>([]);
   // 分镜缩略图：shotId → 素材文件路径（在时间线里直接预览每段画面）
   const [thumbs, setThumbs] = useState<Record<number, string>>({});
@@ -140,7 +145,7 @@ export default function VideoPage() {
     aspectRatio: "9:16",
     resolution: "1080p",
     renderPreset: DEFAULT_RENDER_PRESET,
-    aiDisclosure: false,
+    aiDisclosure: true,
     ctaEnabled: false,
     ctaText: "", // 默认空，开启时按当前语言用 ctaPlaceholder 预填（避免英文用户拿到中文默认 CTA）
     productCard: false,
@@ -240,6 +245,16 @@ export default function VideoPage() {
         const selected = Array.isArray(scripts)
           ? scripts.find((s: { selected?: boolean }) => s.selected) ?? scripts[0]
           : null;
+        // 配音默认值：优先沿用工作台"更多设置"里生成前的选择（本项目 → 全局最近），
+        // 兜底按脚本风格（氛围大片=关）。机器音会毁掉氛围感，用户仍可在本页手动改。
+        const storedSettings =
+          parseStoredAgentGenerationSettings(window.localStorage?.getItem(projectAgentGenerationSettingsKey(id))) ??
+          parseStoredAgentGenerationSettings(window.localStorage?.getItem(AGENT_GENERATION_SETTINGS_LATEST_KEY));
+        if (storedSettings) {
+          setConfig((prev) => ({ ...prev, ttsEnabled: storedSettings.voiceoverEnabled }));
+        } else if (selected && (selected as { styleType?: string }).styleType === "mood") {
+          setConfig((prev) => ({ ...prev, ttsEnabled: false }));
+        }
         if (!selected || !Array.isArray(selected.shots) || selected.shots.length === 0) {
           setLoadError(tRef.current("errorNoScript"));
           setClips([]);
@@ -250,6 +265,7 @@ export default function VideoPage() {
               type: s.type,
               duration: s.duration,
               voiceover: s.voiceover ?? "",
+              description: s.description ?? "",
               transition: s.transition ?? "ai_start_end",
             }))
           );
@@ -309,39 +325,52 @@ export default function VideoPage() {
 
     try {
       // 提交合成任务（后台异步），随后轮询状态
+      const composePayload = {
+        resolution: config.resolution,
+        renderPreset: config.renderPreset,
+        aspectRatio: config.aspectRatio,
+        aiDisclosure: true,
+        ...(config.ctaEnabled && config.ctaText.trim() && { ctaText: config.ctaText.trim() }),
+        ...(config.productCard && { productCard: true }),
+        ...(config.karaoke && { karaoke: true }),
+        ...(config.bgmDuck && { bgmDuck: true }),
+        ...(bgm?.path && { bgmPath: bgm.path }),
+        // 没上传 BGM 且选了非 none 的配乐情绪 → 自动取一条该情绪的免费 CC 配乐（之前这里漏发，下拉形同虚设）
+        ...(!bgm?.path && config.bgm !== "none" && { freeBgm: true, bgmMood: config.bgm }),
+        // 开启配音时：服务端优先读取已发布 ttsAgent；同时提交免费 Edge keyless TTS 作为兜底。
+        ...(config.ttsEnabled && paidTtsReady && {
+          tts: { enabled: true },
+        }),
+        ...(config.ttsEnabled && {
+          freeTts: { enabled: true, voice: config.freeVoice },
+        }),
+      };
+      const composeOperation = acquireComposeOperation(id, "video-preview", composePayload);
       const res = await fetch(`/api/project/${id}/compose`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          resolution: config.resolution,
-          renderPreset: config.renderPreset,
-          aspectRatio: config.aspectRatio,
-          ...(config.aiDisclosure && { aiDisclosure: true }),
-          ...(config.ctaEnabled && config.ctaText.trim() && { ctaText: config.ctaText.trim() }),
-          ...(config.productCard && { productCard: true }),
-          ...(config.karaoke && { karaoke: true }),
-          ...(config.bgmDuck && { bgmDuck: true }),
-          ...(bgm?.path && { bgmPath: bgm.path }),
-          // 没上传 BGM 且选了非 none 的配乐情绪 → 自动取一条该情绪的免费 CC 配乐（之前这里漏发，下拉形同虚设）
-          ...(!bgm?.path && config.bgm !== "none" && { freeBgm: true, bgmMood: config.bgm }),
-          // 开启配音时：服务端优先读取已发布 ttsAgent；同时提交免费 Edge keyless TTS 作为兜底。
-          ...(config.ttsEnabled && paidTtsReady && {
-            tts: { enabled: true },
-          }),
-          ...(config.ttsEnabled && {
-            freeTts: { enabled: true, voice: config.freeVoice },
-          }),
-        }),
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": composeOperation.idempotencyKey,
+        },
+        body: JSON.stringify(composePayload),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || t("errorComposeFailed"));
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        clearComposeOperation(composeOperation);
+        throw new Error(typeof data.error === "string" ? data.error : t("errorComposeFailed"));
+      }
       const compositionId = typeof data.compositionId === "string" ? data.compositionId : "";
+      if (!compositionId) throw new Error(t("errorComposeFailed"));
 
       // 轮询合成状态，直到 done / failed
       const url = await pollComposition(id, compositionId, {
         failMessage: t("errorComposeAssets"),
         timeoutMessage: t("errorComposeTimeout"),
+        onStatus: (status) => {
+          if (status === "done" || status === "failed") clearComposeOperation(composeOperation);
+        },
       });
+      clearComposeOperation(composeOperation);
 
       clearInterval(timer);
       setComposeProgress(100);
@@ -375,8 +404,8 @@ export default function VideoPage() {
             {/* 步骤胶囊在窄屏放不下，移动端隐藏（仅进度展示、非导航） */}
             <div className="hidden sm:flex items-center gap-1">
             <StepProgressIndicator
-              steps={[t("stepScript"), t("stepAssets"), t("stepVideo"), t("stepExport")]}
-              activeIndex={2}
+              steps={[t("stepScript"), t("stepAssets"), t("stepMotion"), t("stepVideo"), t("stepExport")]}
+              activeIndex={3}
               hrefs={workflowStepHrefs}
               backLabel={tc("backPrevStep")}
             />
@@ -624,9 +653,18 @@ export default function VideoPage() {
                   <h3 className="text-base font-semibold">{t("videoResultTitle")}</h3>
                   <span className="text-xs text-muted-foreground">{t("timelineMeta", { count: clips.length, duration: totalDuration })}</span>
                 </div>
+                {(() => {
+                  const staticCount = clips.filter((c) => thumbs[c.shotId] && !isVideoPath(thumbs[c.shotId])).length;
+                  return staticCount > 0 ? (
+                    <div className="mt-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+                      {t("staticClipsWarning", { count: staticCount })}
+                    </div>
+                  ) : null;
+                })()}
                 <div className="mt-4 space-y-2.5">
-                  {clips.slice(0, 5).map((clip) => {
+                  {clips.map((clip) => {
                     const typeInfo = shotTypeLabels[clip.type];
+                    const isMotionClip = thumbs[clip.shotId] ? isVideoPath(thumbs[clip.shotId]) : undefined;
                     return (
                       <div key={clip.shotId} className="rounded-lg border border-border/50 bg-muted/10 p-3">
                         <div className="flex gap-3">
@@ -658,8 +696,15 @@ export default function VideoPage() {
                                 {t(typeInfo.labelKey)}
                               </Badge>
                               <span className="text-[11px] text-muted-foreground">{clip.duration}s</span>
+                              {isMotionClip !== undefined && (
+                                <span
+                                  className={`text-[10px] ${isMotionClip ? "text-emerald-600 dark:text-emerald-400" : "text-amber-600 dark:text-amber-400"}`}
+                                >
+                                  {isMotionClip ? t("clipMotionBadge") : t("clipStillBadge")}
+                                </span>
+                              )}
                             </div>
-                            <p className="line-clamp-2 text-sm leading-relaxed text-foreground">{clip.voiceover}</p>
+                            <p className="line-clamp-2 text-sm leading-relaxed text-foreground">{clip.voiceover || clip.description}</p>
                           </div>
                         </div>
                       </div>
@@ -717,10 +762,10 @@ export default function VideoPage() {
                 <h2 className="text-base font-semibold">{t("timelineTitle")}</h2>
                 <p className="text-xs text-muted-foreground mt-0.5">{t("timelineMeta", { count: clips.length, duration: totalDuration })}</p>
               </div>
-              <Link href={`/project/${id}/assets`}>
+              <Link href={`/project/${id}/motion`}>
                 <Button variant="outline" size="sm" className="text-xs">
                   <LuArrowLeft className="w-3.5 h-3.5 mr-1" />
-                  {t("backToAssets")}
+                  {t("backToMotion")}
                 </Button>
               </Link>
             </div>
@@ -969,12 +1014,9 @@ export default function VideoPage() {
                 <Label className="text-sm font-medium">{t("complianceLabel")}</Label>
                 <div className="flex items-center justify-between">
                   <span className="text-xs text-muted-foreground">{t("aiDisclosureLabel")}</span>
-                  <button
-                    onClick={() => setConfig((c) => ({ ...c, aiDisclosure: !c.aiDisclosure }))}
-                    className={`relative w-10 h-5 rounded-full transition-colors ${config.aiDisclosure ? "bg-primary" : "bg-muted"}`}
-                  >
-                    <div className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${config.aiDisclosure ? "translate-x-5" : "translate-x-0.5"}`} />
-                  </button>
+                  <span className="rounded-full bg-emerald-500/10 px-2 py-1 text-[11px] font-medium text-emerald-600">
+                    {t("aiDisclosureRequired")}
+                  </span>
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-xs text-muted-foreground">{t("ctaLabel")}</span>

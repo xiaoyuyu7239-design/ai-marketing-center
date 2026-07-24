@@ -3,7 +3,6 @@
  * 包含经典爆款脚本结构，适用于零食、饮品、预制菜、调味料等
  */
 
-import type { Shot } from "@backend/db/schema";
 import type { ScriptTemplate } from "./beauty";
 
 export const foodTemplates: ScriptTemplate[] = [

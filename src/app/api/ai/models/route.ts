@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createProvider } from "@backend/providers";
 import type { MediaType, Model } from "@backend/providers/types";
+import { isAdminOrDesktopRequest } from "@server/admin/admin-auth";
+import { AUTHENTICATED_IP_RATE_LIMIT_PRESETS, consumeAuthenticatedIpRateLimit, rateLimitResponse } from "@backend/core/security/rate-limit";
 
 /**
  * 聚合各启用平台的可用模型列表
@@ -12,6 +14,11 @@ import type { MediaType, Model } from "@backend/providers/types";
  *   { models: Model[] }  // 已按 provider 聚合
  */
 export async function POST(req: NextRequest) {
+  if (!isAdminOrDesktopRequest(req)) {
+    return NextResponse.json({ error: "无权访问" }, { status: 403 });
+  }
+  const limit = consumeAuthenticatedIpRateLimit(req, "ai:list-models", AUTHENTICATED_IP_RATE_LIMIT_PRESETS.providerProbe);
+  if (!limit.allowed) return rateLimitResponse(limit, "模型列表刷新过于频繁，请稍后再试");
   const body = await req.json();
   const providers = (body.providers ?? []) as Array<{
     name: string;
